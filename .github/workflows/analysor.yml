@@ -1,0 +1,87 @@
+name: Market Analysor
+
+on:
+  schedule:
+    - cron: '50 17 * * *'   # 19:50 Oslo (sommer, UTC+2)
+    - cron: '50 18 * * *'   # 19:50 Oslo (vinter, UTC+1)
+  workflow_dispatch:
+    inputs:
+      force:
+        description: 'Tving full kjøring'
+        required: false
+        default: 'true'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: market-analysor
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Backfill score-historikk (idempotent, valgfri)
+        env:
+          MPLBACKEND: Agg
+        run: python scripts/backfill_history.py || true
+
+      - name: Bygg analysor
+        env:
+          MPLBACKEND: Agg
+          FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
+          FORCE_RUN: ${{ github.event.inputs.force }}
+        run: python scripts/build.py
+
+      - name: List genererte filer
+        run: |
+          echo "=== docs/ ===" && ls -la docs/ || true
+
+      - name: Upload artifacts
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: analysor-output
+          path: |
+            docs/index.json
+            docs/index.html
+            docs/report.html
+            docs/portfolio.html
+
+      - name: Sanity-sjekk før deploy
+        run: |
+          set -e
+          test -f docs/index.json
+          test -f docs/index.html
+          test -f docs/report.html
+          test -f docs/portfolio.html
+          SIZE=$(stat -c%s docs/index.json)
+          echo "index.json: ${SIZE} bytes"
+          if [ "${SIZE:-0}" -lt 5000 ]; then
+            echo "::warning::index.json for liten — hopper over deploy"
+            echo "SKIP_DEPLOY=1" >> $GITHUB_ENV
+          fi
+
+      - name: Deploy til gh-pages
+        if: env.SKIP_DEPLOY != '1'
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./docs
+          publish_branch: gh-pages
+          user_name: github-actions[bot]
+          user_email: 41898282+github-actions[bot]@users.noreply.github.com
