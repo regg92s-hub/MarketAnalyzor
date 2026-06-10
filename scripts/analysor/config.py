@@ -12,7 +12,7 @@ Endringer fra market-daily-report (v8 -> analysor):
   - Lightweight Charts i stedet for matplotlib-PNG-er
 """
 
-VERSION = "2026-06-08-analysor-v1"
+VERSION = "2026-06-09-analysor-v2"
 
 # ──────────────────────────────────────────────────────────────────
 # INSTRUMENT-UNIVERS
@@ -131,6 +131,14 @@ CYCLICAL_PAIRS = [
 
 # TradingView-symbolmapping (krypto -> spot, ikke ETF)
 TV_SYMBOL_MAP = {"BTC": "BTCUSD", "ETH": "ETHUSD", "ETHA": "ETHUSD", "NOK": "USDNOK"}
+
+# Kuratert sett for korrelasjonsmatrise (hovedaktivaklasser – en 33x33 er uleselig)
+CORR_SET = ["SPY", "QQQ", "IWM", "EEM", "TLT", "HYG", "GLD", "SLV",
+            "DBC", "USO", "XLE", "URA", "BTC", "UUP"]
+
+# Instrumenter på RRG-scatter (leadership vs gull). Holdes lesbart.
+RRG_SET = ["SPY", "QQQ", "IWM", "EEM", "ACWI", "SOXX", "XLE", "USO", "DBC",
+           "COPX", "SLV", "GDX", "URA", "BTC", "TLT", "VNQ"]
 
 # ──────────────────────────────────────────────────────────────────
 # SIGNAL-PARAMETRE
