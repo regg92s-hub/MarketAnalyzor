@@ -23,7 +23,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import pandas as pd  # noqa: E402
-from analysor import config, data as datamod, scoring, analytics, regime as regimemod, render, portfolio  # noqa: E402
+from analysor import config, data as datamod, scoring, analytics, regime as regimemod, render, portfolio, backtest as backtestmod  # noqa: E402
 from analysor.config import VERSION, PALETTE  # noqa: E402
 from analysor.layout import LWC_CDN, LWC_LOCAL  # noqa: E402
 from analysor import indicators as ind  # noqa: E402
@@ -140,6 +140,9 @@ def main():
     pairs = analytics.cyclical_pairs(raw)
     flow = analytics.money_flow(raw)
     rot = analytics.rotation(raw, assets_meta)
+    rrg = analytics.build_rrg(raw, assets_meta)
+    corr = analytics.build_correlation(raw)
+    bt = backtestmod.run_backtest(raw, config.CYCLICAL_IDS, top_n=5)
     reg = regimemod.build_regime(os.environ.get("FRED_API_KEY", ""))
 
     # 5. Samlet datamodell
@@ -155,6 +158,9 @@ def main():
         "cyclical_pairs": pairs,
         "money_flow": flow,
         "rotation": rot,
+        "rrg": rrg,
+        "correlation": corr,
+        "backtest": bt,
         "regime": reg,
         "notes": {"instrument_count": len(universe)},
     }
@@ -168,6 +174,7 @@ def main():
     (DOCS / "index.html").write_text(render.render_trend(model), encoding="utf-8")
     (DOCS / "report.html").write_text(render.render_report(model), encoding="utf-8")
     (DOCS / "portfolio.html").write_text(portfolio.render_portfolio(model), encoding="utf-8")
+    (DOCS / "backtest.html").write_text(render.render_backtest(model), encoding="utf-8")
     log("HTML-sider skrevet")
 
     # 8. Selvhost Lightweight Charts (last ned hvis mangler)
