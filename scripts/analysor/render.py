@@ -88,6 +88,12 @@ def render_trend(data) -> str:
     out.append(_ranking_table(data.get("ranking_dxy", {}), "💵 vs Dollar (UUP)", "UUP"))
     out.append('</div></section>')
 
+    # RRG-scatter (leadership som rotasjonsgraf)
+    out.append(_rrg_section(data.get("rrg", {})))
+
+    # Korrelasjonsmatrise
+    out.append(_corr_section(data.get("correlation", {})))
+
     # Bredde
     br = data.get("breadth", {})
     if br:
@@ -275,3 +281,187 @@ const io = new IntersectionObserver((entries,obs)=>{
 }, {rootMargin:'200px'});
 CHARTS.forEach(c=>{ const el=document.getElementById(c.el); if(el) io.observe(el); });
 """ % payload
+
+
+# ── RRG-scatter (SVG, ingen ekstern lib) ──────────────────────────
+def _rrg_section(rrg) -> str:
+    pts = (rrg or {}).get("points", [])
+    if not pts:
+        return ""
+    # Skala: finn min/max rundt 100, med marginer
+    xs = [p["rs_ratio"] for p in pts]
+    ys = [p["rs_momentum"] for p in pts]
+    xmin, xmax = min(94, min(xs) - 1), max(106, max(xs) + 1)
+    ymin, ymax = min(94, min(ys) - 1), max(106, max(ys) + 1)
+    W, H, pad = 680, 460, 44
+
+    def sx(v):
+        return pad + (v - xmin) / (xmax - xmin) * (W - 2 * pad)
+
+    def sy(v):
+        return H - pad - (v - ymin) / (ymax - ymin) * (H - 2 * pad)
+
+    x100, y100 = sx(100), sy(100)
+    # Kvadrant-farger (colorblind-trygge, lav metning)
+    quad_cols = {"Leading": "#0072B2", "Weakening": "#E69F00",
+                 "Lagging": "#D55E00", "Improving": "#56B4E9"}
+    svg = [f'<svg viewBox="0 0 {W} {H}" width="100%" style="max-width:700px;background:var(--panel2);border-radius:10px">']
+    # kvadrant-bakgrunner
+    svg.append(f'<rect x="{x100}" y="{pad}" width="{W-pad-x100}" height="{y100-pad}" fill="#0072B215"/>')
+    svg.append(f'<rect x="{x100}" y="{y100}" width="{W-pad-x100}" height="{H-pad-y100}" fill="#E69F0015"/>')
+    svg.append(f'<rect x="{pad}" y="{y100}" width="{x100-pad}" height="{H-pad-y100}" fill="#D55E0015"/>')
+    svg.append(f'<rect x="{pad}" y="{pad}" width="{x100-pad}" height="{y100-pad}" fill="#56B4E915"/>')
+    # akse-kryss
+    svg.append(f'<line x1="{x100}" y1="{pad}" x2="{x100}" y2="{H-pad}" stroke="#3a4452" stroke-dasharray="4 4"/>')
+    svg.append(f'<line x1="{pad}" y1="{y100}" x2="{W-pad}" y2="{y100}" stroke="#3a4452" stroke-dasharray="4 4"/>')
+    # kvadrant-etiketter
+    svg.append(f'<text x="{W-pad-6}" y="{pad+16}" fill="#0072B2" font-size="12" text-anchor="end" font-weight="700">LEADING</text>')
+    svg.append(f'<text x="{W-pad-6}" y="{H-pad-6}" fill="#E69F00" font-size="12" text-anchor="end" font-weight="700">WEAKENING</text>')
+    svg.append(f'<text x="{pad+6}" y="{H-pad-6}" fill="#D55E00" font-size="12" font-weight="700">LAGGING</text>')
+    svg.append(f'<text x="{pad+6}" y="{pad+16}" fill="#56B4E9" font-size="12" font-weight="700">IMPROVING</text>')
+    # akse-titler
+    svg.append(f'<text x="{W/2}" y="{H-8}" fill="var(--muted)" font-size="11" text-anchor="middle">RS-Ratio (relativ styrke) →</text>')
+    svg.append(f'<text x="14" y="{H/2}" fill="var(--muted)" font-size="11" text-anchor="middle" transform="rotate(-90 14 {H/2})">RS-Momentum →</text>')
+    # punkter med haler
+    for p in pts:
+        col = quad_cols.get(p["quadrant"], "#999")
+        px, py = sx(p["rs_ratio"]), sy(p["rs_momentum"])
+        tail = p.get("tail", [])
+        if len(tail) >= 2:
+            pl = " ".join(f"{sx(a)},{sy(b)}" for a, b in tail)
+            svg.append(f'<polyline points="{pl}" fill="none" stroke="{col}" stroke-width="1.5" opacity="0.45"/>')
+        svg.append(f'<circle cx="{px}" cy="{py}" r="5" fill="{col}" stroke="#0b0d10" stroke-width="1.5"/>')
+        svg.append(f'<text x="{px+8}" y="{py+4}" fill="var(--text)" font-size="11" font-weight="600">{html.escape(p["label"])}</text>')
+    svg.append('</svg>')
+    return ('<section class="section"><h2>🔄 RRG — Relative Rotation Graph (vs gull)</h2>'
+            '<p class="sub">RS-Ratio (relativ styrke) på x-aksen, RS-Momentum (endringstakt) på y-aksen, '
+            'sentrert på 100. Instrumenter roterer mot klokka: Improving → Leading → Weakening → Lagging. '
+            'Halen viser de siste punktene (retning). Ett blikk gir hele lederskapsbildet.</p>'
+            + "".join(svg) +
+            '<details><summary>Hvordan lese RRG</summary>'
+            '<p class="sub" style="margin-top:8px">Øvre høyre (Leading, blå) = slår gull med positivt momentum — '
+            'sterkest. Nedre høyre (Weakening, oransje) = fortsatt over, men momentum avtar. Nedre venstre '
+            '(Lagging, vermillion) = svakest. Øvre venstre (Improving, lyseblå) = under gull, men på vei opp — '
+            'tidlige vendingskandidater. En sunn opptrend roterer Improving → Leading.</p></details>'
+            '</section>')
+
+
+# ── Korrelasjonsmatrise (SVG heatmap) ─────────────────────────────
+def _corr_section(corr) -> str:
+    ids = (corr or {}).get("ids", [])
+    mat = (corr or {}).get("matrix", [])
+    if not ids or not mat:
+        return ""
+    n = len(ids)
+    cell = 34
+    label_pad = 46
+    W = label_pad + n * cell + 10
+    H = label_pad + n * cell + 10
+
+    def color(v):
+        # Divergerende, colorblind-trygt: blå (negativ) — grå (0) — vermillion (positiv)
+        if v >= 0:
+            t = min(v, 1.0)
+            return f'rgba(213,94,0,{0.12 + 0.6*t:.2f})'   # vermillion
+        t = min(-v, 1.0)
+        return f'rgba(0,114,178,{0.12 + 0.6*t:.2f})'       # blå
+
+    svg = [f'<svg viewBox="0 0 {W} {H}" width="100%" style="max-width:{W}px;background:var(--panel2);border-radius:10px">']
+    for j, lab in enumerate(ids):
+        x = label_pad + j * cell + cell / 2
+        svg.append(f'<text x="{x}" y="{label_pad-6}" fill="var(--muted)" font-size="10" text-anchor="middle" transform="rotate(-45 {x} {label_pad-6})">{html.escape(lab)}</text>')
+        y = label_pad + j * cell + cell / 2 + 3
+        svg.append(f'<text x="{label_pad-6}" y="{y}" fill="var(--muted)" font-size="10" text-anchor="end">{html.escape(lab)}</text>')
+    for i in range(n):
+        for j in range(n):
+            v = mat[i][j]
+            x = label_pad + j * cell
+            y = label_pad + i * cell
+            tcol = "#e6edf3" if abs(v) > 0.45 else "#9aa7b5"
+            svg.append(f'<rect x="{x}" y="{y}" width="{cell-2}" height="{cell-2}" rx="3" fill="{color(v)}"/>')
+            svg.append(f'<text x="{x+cell/2-1}" y="{y+cell/2+3}" fill="{tcol}" font-size="9" text-anchor="middle">{v:.2f}</text>')
+    svg.append('</svg>')
+    return ('<section class="section"><h2>🔗 Korrelasjonsmatrise (252 dager)</h2>'
+            '<p class="sub">Daglig-avkastnings-korrelasjon mellom hovedaktivaklasser. '
+            'Vermillion = positiv samvariasjon, blå = negativ. Lav/negativ korrelasjon mellom '
+            'posisjoner = ekte diversifisering; høy korrelasjon = skjult konsentrasjonsrisiko.</p>'
+            + "".join(svg) + '</section>')
+
+
+# ── Backtest-side ─────────────────────────────────────────────────
+def render_backtest(data) -> str:
+    P = layout.head("Backtest", 3)
+    bt = data.get("backtest", {})
+    out = [P, '<h1>🧪 Backtest — walk-forward</h1>',
+           '<p class="sub">Ærlig out-of-sample-test av en enkel, økonomisk motivert rotasjonsregel: '
+           'eier topp-N sykliske mot gull (3M+6M momentum), med absolutt-momentum-filter (dual momentum) '
+           'og volatilitetsskalering mot momentum-krasj. Ingen parameteroptimalisering på testdata.</p>']
+
+    if not bt.get("available"):
+        out.append(f'<section class="section"><p class="down">Backtest utilgjengelig: '
+                   f'{html.escape(bt.get("reason","ukjent"))}.</p></section>')
+        out.append(layout.foot())
+        return "".join(out)
+
+    s, sp, g = bt["strategy"], bt["spy"], bt["gold"]
+    out.append('<section class="section"><h2>Resultater</h2>'
+               f'<p class="sub">Periode {bt["start"]} → {bt["end"]} ({bt["months"]} måneder), '
+               f'topp-{bt["top_n"]}, snitt {bt["avg_holdings"]} posisjoner. Månedlig rebalansering.</p>'
+               '<table><thead><tr><th>Strategi</th><th style="text-align:right">Total</th>'
+               '<th style="text-align:right">CAGR</th><th style="text-align:right">Vol</th>'
+               '<th style="text-align:right">Sharpe</th><th style="text-align:right">Max DD</th></tr></thead><tbody>')
+    for name, d, col in [("Rotasjon (regel)", s, PALETTE["up"]),
+                         ("Kjøp-og-hold SPY", sp, PALETTE["accent"]),
+                         ("Kjøp-og-hold gull", g, PALETTE["warn"])]:
+        out.append(f'<tr><td style="color:{col};font-weight:600">{name}</td>'
+                   f'<td style="text-align:right">{d.get("total_return","–")}%</td>'
+                   f'<td style="text-align:right">{d.get("cagr","–")}%</td>'
+                   f'<td style="text-align:right">{d.get("vol","–")}%</td>'
+                   f'<td style="text-align:right">{d.get("sharpe","–")}</td>'
+                   f'<td style="text-align:right" class="down">{d.get("max_dd","–")}%</td></tr>')
+    out.append('</tbody></table>')
+    out.append('<div class="lwc" id="bt_chart" style="height:340px"></div></section>')
+
+    # ekvitykurve via Lightweight Charts (3 serier)
+    series = {
+        "strat": [[bt["dates"][i], bt["strategy"]["curve"][i]] for i in range(len(bt["dates"]))],
+        "spy": [[bt["dates"][i], bt["spy"]["curve"][i]] for i in range(len(bt["dates"]))],
+        "gold": [[bt["dates"][i], bt["gold"]["curve"][i]] for i in range(len(bt["dates"]))],
+    }
+    out.append('<section class="section"><h2>Tolkning &amp; forbehold</h2>'
+               '<p class="sub">En clean walk-forward kan fortsatt smigre en regel. Sammenlign '
+               '<strong>out-of-sample Sharpe</strong> mot kjøp-og-hold: hvis rotasjonsregelen ikke '
+               'slår en enkel SPY-/gull-posisjon på risikojustert basis, er den ikke verdt kompleksiteten. '
+               'Momentum krasjer sjelden, men hardt, i skarpe vendinger etter bear-marked (Daniel &amp; '
+               'Moskowitz 2016) — derfor volatilitetsskaleringen. <strong>Ikke finansrådgivning.</strong></p>'
+               '<details><summary>Metodikk</summary>'
+               '<p class="sub" style="margin-top:8px">Signaler beregnes fra data t.o.m. forrige måned og '
+               'brukes på inneværende måneds avkastning (ingen look-ahead). Cash-avkastning antas 0%. '
+               'Transaksjonskostnader er ikke modellert — reell avkastning ville vært noe lavere. '
+               'Universet er dagens sykliske instrumenter; instrumenter uten nok historikk faller naturlig ut '
+               'tidlig i perioden (en mild survivorship-effekt).</p></details></section>')
+
+    out.append(layout.lwc_script())
+    out.append('<script>\nconst BT = ' + json.dumps(series) + ';\n' + _bt_chart_js() + '\n</script>')
+    out.append(layout.foot())
+    return "".join(out)
+
+
+def _bt_chart_js() -> str:
+    return """
+function initBt(){
+  const el = document.getElementById('bt_chart');
+  if(!el || !window.LightweightCharts) return;
+  const chart = LightweightCharts.createChart(el, {
+    height:340, layout:{background:{color:'transparent'}, textColor:'#9aa7b5'},
+    grid:{vertLines:{color:'#1a1f26'}, horzLines:{color:'#1a1f26'}},
+    rightPriceScale:{borderColor:'#262d36'}, timeScale:{borderColor:'#262d36'}
+  });
+  const mk = (data,color)=>{ const s=chart.addLineSeries({color,lineWidth:2});
+    s.setData(data.map(p=>({time:p[0]+'-01', value:p[1]}))); return s; };
+  mk(BT.strat, '#0072B2'); mk(BT.spy, '#56B4E9'); mk(BT.gold, '#E69F00');
+  chart.timeScale().fitContent();
+  new ResizeObserver(()=>chart.applyOptions({width:el.clientWidth})).observe(el);
+}
+if(window.LightweightCharts) initBt(); else window.addEventListener('load', initBt);
+"""
