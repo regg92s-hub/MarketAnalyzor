@@ -177,3 +177,51 @@ def vol_target_weight(vol_pct: float | None, target_annual: float = 0.12) -> flo
     if vol_pct is None or vol_pct <= 0:
         return None
     return float(target_annual / (vol_pct / 100.0))
+
+
+# ── RRG: Relative Rotation Graph (JdK RS-Ratio / RS-Momentum) ─────
+def rrg_point(num: pd.Series, den: pd.Series, window: int = 63) -> dict | None:
+    """
+    Forenklet JdK RS-Ratio/RS-Momentum for ett instrument vs baseline.
+
+    RS-Ratio  = normalisert relativ styrke (trend i ratioen, sentrert på 100).
+    RS-Momentum = normalisert endringstakt i RS-Ratio (sentrert på 100).
+
+    Kvadranter (klokka rundt): Leading (x>100,y>100) -> Weakening (x>100,y<100)
+    -> Lagging (x<100,y<100) -> Improving (x<100,y>100).
+    Returnerer None ved for kort historikk.
+    """
+    comb = pd.DataFrame({"n": num, "d": den}).dropna()
+    if len(comb) < window * 2 + 5:
+        return None
+    rs = (comb["n"] / comb["d"]) * 100.0
+    # RS-Ratio: hvor langt RS ligger over/under eget glidende snitt, z-skåret
+    rs_sma = rs.rolling(window).mean()
+    rs_std = rs.rolling(window).std()
+    rs_ratio = 100 + (rs - rs_sma) / rs_std.replace(0, np.nan)
+    rs_ratio = rs_ratio.dropna()
+    if len(rs_ratio) < window + 5:
+        return None
+    # RS-Momentum: endringstakt i RS-Ratio, z-skåret
+    roc_rr = rs_ratio.diff(int(window / 3))
+    mom = 100 + (roc_rr - roc_rr.rolling(window).mean()) / roc_rr.rolling(window).std().replace(0, np.nan)
+    mom = mom.dropna()
+    if mom.empty or rs_ratio.empty:
+        return None
+    x = float(rs_ratio.iloc[-1])
+    y = float(mom.iloc[-1])
+    if not (np.isfinite(x) and np.isfinite(y)):
+        return None
+    if x >= 100 and y >= 100:
+        quad = "Leading"
+    elif x >= 100 and y < 100:
+        quad = "Weakening"
+    elif x < 100 and y < 100:
+        quad = "Lagging"
+    else:
+        quad = "Improving"
+    # liten hale (siste 5 punkter) for retning
+    tail = [[round(float(a), 2), round(float(b), 2)]
+            for a, b in zip(rs_ratio.tail(5), mom.tail(5))
+            if np.isfinite(a) and np.isfinite(b)]
+    return {"rs_ratio": round(x, 2), "rs_momentum": round(y, 2), "quadrant": quad, "tail": tail}
