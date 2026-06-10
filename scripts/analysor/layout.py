@@ -80,6 +80,12 @@ tr:last-child td {{ border-bottom:none; }}
 .up {{ color:var(--up); }} .down {{ color:var(--down); }} .warn {{ color:var(--warn); }}
 .tag {{ display:inline-block; padding:1px 6px; border-radius:6px; font-size:10px; font-weight:600;
   background:var(--panel2); border:1px solid var(--border); }}
+.chip {{ display:inline-flex; align-items:center; gap:5px; padding:4px 10px; margin:2px;
+  border-radius:8px; font-size:13px; font-weight:700; text-decoration:none;
+  background:var(--panel2); border:1px solid var(--accent); color:var(--accent); }}
+.chip:hover {{ background:var(--accent); color:#06121f; }}
+.chip-tf {{ font-size:10px; font-weight:600; opacity:0.8; padding:1px 5px; border-radius:5px;
+  background:rgba(86,180,233,0.18); }}
 .lwc {{ width:100%; height:240px; }}
 .tv {{ color:var(--accent); font-size:11px; text-decoration:none; }}
 details {{ background:var(--panel2); border:1px solid var(--border); border-radius:9px;
