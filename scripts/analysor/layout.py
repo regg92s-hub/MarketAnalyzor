@@ -32,6 +32,7 @@ NAV = """
   <a href="index.html" class="{a0}">📈 Trend-oversikt</a>
   <a href="report.html" class="{a1}">📊 Market Daily Report</a>
   <a href="portfolio.html" class="{a2}">💼 Portefølje</a>
+  <a href="backtest.html" class="{a3}">🧪 Backtest</a>
 </nav>
 """
 
@@ -99,9 +100,9 @@ footer {{ color:var(--muted); font-size:12px; margin:20px 0; }}
 
 
 def head(title: str, active: int) -> str:
-    cls = ["", "", ""]
+    cls = ["", "", "", ""]
     cls[active] = "active"
-    nav = NAV.format(a0=cls[0], a1=cls[1], a2=cls[2])
+    nav = NAV.format(a0=cls[0], a1=cls[1], a2=cls[2], a3=cls[3])
     return f"""<!doctype html>
 <html lang="no">
 <head>
