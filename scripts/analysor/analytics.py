@@ -213,3 +213,30 @@ def rotation(raw, assets_meta):
         col, note = PALETTE["up"], "Flertallet slår gull – risk-on holder følge."
     return {"label": f"{len(beats)}/{tot} slår gull (ROC 1M eller 3M)",
             "col": col, "note": note, "beats": beats, "loses": loses}
+
+
+def build_rrg(raw, assets_meta):
+    """RRG-punkter (RS-Ratio/RS-Momentum) for RRG_SET vs gull."""
+    from .config import RRG_SET
+    gld = raw.get("GLD")
+    if gld is None:
+        return {"baseline": "GLD", "points": []}
+    points = []
+    for iid in RRG_SET:
+        num = raw.get(iid)
+        if num is None:
+            continue
+        pt = ind.rrg_point(num["close_use"], gld["close_use"])
+        if pt is None:
+            continue
+        pt["id"] = iid
+        pt["label"] = assets_meta.get(iid, {}).get("symbol_label", iid)
+        points.append(pt)
+    return {"baseline": "GLD", "points": points}
+
+
+def build_correlation(raw):
+    """Korrelasjonsmatrise for det kuraterte settet."""
+    from .config import CORR_SET
+    closes = {iid: raw[iid]["close_use"] for iid in CORR_SET if iid in raw}
+    return ind.correlation_matrix(closes)
