@@ -45,56 +45,27 @@ def render_trend(data) -> str:
     reg = data.get("regime", {})
     out.append('<section class="section"><h2>Makro-regime</h2>'
                '<p class="sub">NFTRH-kontekst: renteregime, Fed-likviditet og kredittspreader. '
-               'Regime-score = andel risk-on-faktorer (yield-kurve positiv, likviditet inn, spreader stramme).</p>'
-               '<div class="sector-grid">')
-    comp = reg.get("composite")
-    if comp:
-        out.append(_regime_card("Samlet regime", comp.get("label"), comp.get("col"), comp.get("state", "")))
-    for key, title in [("yield_curve", "Yield-kurve 2s10s"), ("term_spread_10y3m", "10y-3m spread"),
-                       ("fed_liquidity", "Fed-likviditet"), ("credit_spread", "Kredittspread")]:
-        r = reg.get(key)
-        if r:
-            out.append(_regime_card(title, r.get("label"), r.get("col"), r.get("note", "")))
-    out.append('</div></section>')
+               'Regime-score = andel risk-on-faktorer (yield-kurve positiv, likviditet inn, spreader stramme).</p>')
+    if not reg:
+        out.append('<div class="sc" style="border-color:#E69F0055">'
+                   '<div class="sc-name warn">⚠ Makro-regime mangler data</div>'
+                   '<div class="sc-label muted">Krever <strong>FRED_API_KEY</strong> som repo-secret '
+                   '(gratis nøkkel fra fredaccount.stlouisfed.org/apikeys). '
+                   'Legg den til i Settings → Secrets → Actions og kjør workflowen på nytt.</div></div>')
+    else:
+        out.append('<div class="sector-grid">')
+        comp = reg.get("composite")
+        if comp:
+            out.append(_regime_card("Samlet regime", comp.get("label"), comp.get("col"), comp.get("state", "")))
+        for key, title in [("yield_curve", "Yield-kurve 2s10s"), ("term_spread_10y3m", "10y-3m spread"),
+                           ("fed_liquidity", "Fed-likviditet"), ("credit_spread", "Kredittspread")]:
+            r = reg.get(key)
+            if r:
+                out.append(_regime_card(title, r.get("label"), r.get("col"), r.get("note", "")))
+        out.append('</div>')
+    out.append('</section>')
 
-    # Kapitalrotasjon
-    rot = data.get("rotation")
-    if rot:
-        out.append('<section class="section"><h2>Kapitalrotasjon — hovedinstrumenter vs gull</h2>'
-                   f'<p class="sub">{html.escape(rot["note"])} '
-                   'Slår gull = positiv ROC på 1M eller 3M. Klikk 📊 for ratioen i TradingView.</p>')
-        out.append(f'<p style="font-size:15px;font-weight:700;color:{rot["col"]}">{html.escape(rot["label"])}</p>')
-        out.append('<div style="margin:6px 0">')
-        for grp, beat in [("beats", True), ("loses", False)]:
-            items = rot.get(grp, [])
-            lab = "Slår gull" if beat else "Taper mot gull"
-            icon = "▲" if beat else "▼"
-            cls = "up" if beat else "down"
-            chips = []
-            for it in items:
-                tf = "+".join(it.get("tf_over", [])) or ("" if beat else "—")
-                chips.append(f'<a class="tag" href="{_tv(it["sym"],"GLD")}" target="_blank" rel="noopener">'
-                             f'{html.escape(it["sym"])} {tf} 📊</a>')
-            out.append(f'<div style="margin:4px 0"><span class="{cls}" style="font-weight:600;font-size:12px">'
-                       f'{icon} {lab}:</span> {" ".join(chips) or "<span class=muted>ingen</span>"}</div>')
-        out.append('</div></section>')
-
-    # Leadership ranking (vs gull + vs dollar)
-    out.append('<section class="section"><h2>🏆 Leadership ranking (relativ styrke)</h2>'
-               '<p class="sub">Sykliske instrumenter rangert etter vektet ROC mot gull og dollar. '
-               'Leder = positiv ROC på 1M eller 3M (vises i Trend-kolonnen).</p>'
-               '<div class="grid grid2">')
-    out.append(_ranking_table(data.get("ranking_gold", {}), "🥇 vs Gull (GLD)", "GLD"))
-    out.append(_ranking_table(data.get("ranking_dxy", {}), "💵 vs Dollar (UUP)", "UUP"))
-    out.append('</div></section>')
-
-    # RRG-scatter (leadership som rotasjonsgraf)
-    out.append(_rrg_section(data.get("rrg", {})))
-
-    # Korrelasjonsmatrise
-    out.append(_corr_section(data.get("correlation", {})))
-
-    # Bredde
+    # Markedsbredde (flyttet opp – overordnet markedstilstand først)
     br = data.get("breadth", {})
     if br:
         out.append('<section class="section"><h2>📐 Markedsbredde</h2>'
@@ -111,7 +82,7 @@ def render_trend(data) -> str:
                        f'<div class="sc-label muted">{n} instrumenter</div></div>')
         out.append('</div></section>')
 
-    # Money flow
+    # Money flow (flyttet opp)
     mf = data.get("money_flow", [])
     if mf:
         out.append('<section class="section"><h2>💧 Money flow &amp; likviditet</h2>'
@@ -129,6 +100,44 @@ def render_trend(data) -> str:
                        f'<div class="sc-label" style="color:{f["col"]}">{ostr}</div>'
                        f'<div class="sc-label muted">{html.escape(f["note"])}</div></div>')
         out.append('</div></section>')
+
+    # Kapitalrotasjon
+    rot = data.get("rotation")
+    if rot:
+        out.append('<section class="section"><h2>Kapitalrotasjon — hovedinstrumenter vs gull</h2>'
+                   f'<p class="sub">{html.escape(rot["note"])} '
+                   'Slår gull = positiv ROC på 1M eller 3M. Klikk for ratioen i TradingView.</p>')
+        out.append(f'<p style="font-size:15px;font-weight:700;color:{rot["col"]}">{html.escape(rot["label"])}</p>')
+        out.append('<div style="margin:6px 0">')
+        for grp, beat in [("beats", True), ("loses", False)]:
+            items = rot.get(grp, [])
+            lab = "Slår gull" if beat else "Taper mot gull"
+            icon = "▲" if beat else "▼"
+            cls = "up" if beat else "down"
+            chips = []
+            for it in items:
+                tf = "+".join(it.get("tf_over", [])) or ("" if beat else "—")
+                chips.append(f'<a class="chip" href="{_tv(it["sym"],"GLD")}" target="_blank" rel="noopener">'
+                             f'{html.escape(it["sym"])}<span class="chip-tf">{tf}</span> 📊</a>')
+            out.append(f'<div style="margin:6px 0"><span class="{cls}" style="font-weight:600;font-size:13px">'
+                       f'{icon} {lab}:</span> {" ".join(chips) or "<span class=muted>ingen</span>"}</div>')
+        out.append('</div></section>')
+
+    # Leadership ranking (vs gull + vs dollar)
+    out.append('<section class="section"><h2>🏆 Leadership ranking (relativ styrke)</h2>'
+               '<p class="sub">Sykliske instrumenter rangert etter vektet ROC mot gull og dollar. '
+               '<strong>Leder %</strong> = hvor mye ratioen har steget (3M ROC) — altså hvor kraftig '
+               'det slår, ikke bare at det slår.</p>'
+               '<div class="grid grid2">')
+    out.append(_ranking_table(data.get("ranking_gold", {}), "🥇 vs Gull (GLD)", "GLD"))
+    out.append(_ranking_table(data.get("ranking_dxy", {}), "💵 vs Dollar (UUP)", "UUP"))
+    out.append('</div></section>')
+
+    # RRG-scatter (leadership som rotasjonsgraf)
+    out.append(_rrg_section(data.get("rrg", {})))
+
+    # Korrelasjonsmatrise
+    out.append(_corr_section(data.get("correlation", {})))
 
     # Sykliske par
     cp = data.get("cyclical_pairs", [])
@@ -162,20 +171,34 @@ def _ranking_table(rk, title, den):
     rows = rk.get("rows", [])
     if not rows:
         return f'<div><h3>{title}</h3><p class="muted">Ingen data.</p></div>'
+    # maks composite for skalering av styrke-bar
+    comps = [abs(r.get("composite") or 0) for r in rows]
+    maxc = max(comps) if comps else 1
     out = [f'<div><h3>{title}</h3>',
            '<table><thead><tr><th>#</th><th>Ratio</th><th>Sjanger</th>'
            '<th style="text-align:right">1M</th><th style="text-align:right">3M</th>'
-           '<th>Trend</th><th>TV</th></tr></thead><tbody>']
+           '<th>Leder-styrke</th><th>TV</th></tr></thead><tbody>']
     for i, r in enumerate(rows, 1):
         tf = r.get("tf_over") or []
-        trend = _arrow(r.get("beats"))
-        if r.get("beats") and tf:
-            trend = f'<span class="up">▲ Leder ({"+".join(tf)})</span>'
+        comp = r.get("composite")
+        beats = r.get("beats")
+        # Styrke-celle: ikon + tall + proporsjonal bar
+        if beats and comp is not None:
+            barw = int(min(abs(comp) / maxc * 100, 100)) if maxc else 0
+            tfs = "+".join(tf) if tf else ""
+            strength = (f'<div style="font-size:12px;font-weight:700;color:{PALETTE["up"]}">'
+                        f'▲ +{comp:.1f}% <span class="muted" style="font-weight:400">{tfs}</span></div>'
+                        f'<div style="height:5px;background:#1a1f26;border-radius:3px;margin-top:2px">'
+                        f'<div style="height:5px;width:{barw}%;background:{PALETTE["up"]};border-radius:3px"></div></div>')
+        elif beats is False and comp is not None:
+            strength = f'<div style="font-size:12px;font-weight:700;color:{PALETTE["down"]}">▼ {comp:.1f}%</div>'
+        else:
+            strength = '<span class="muted">— n/a</span>'
         out.append(f'<tr><td class="muted">{i}</td>'
                    f'<td><strong>{html.escape(r["label"])}/{den}</strong></td>'
                    f'<td class="muted">{html.escape(r.get("subclass",""))}</td>'
                    f'{_roc_cell(r.get("roc_1m"))}{_roc_cell(r.get("roc_3m"))}'
-                   f'<td>{trend}</td>'
+                   f'<td style="min-width:120px">{strength}</td>'
                    f'<td><a class="tv" href="{_tv(r["label"],den)}" target="_blank" rel="noopener">📊</a></td></tr>')
     out.append('</tbody></table></div>')
     return "".join(out)
@@ -184,69 +207,83 @@ def _ranking_table(rk, title, den):
 # ── Market Daily Report ───────────────────────────────────────────
 def render_report(data) -> str:
     P = layout.head("Market Daily Report", 1)
-    out = [P, '<h1>📊 Market Daily Report</h1>',
+    out = [P, '<h1 id="top">📊 Market Daily Report</h1>',
            '<p class="sub">Northstar-score 0–100 (høyere = lavere risiko / bedre entry), '
            'snitt av RSI, MACD og MA-avstand over ukentlig/månedlig/kvartal. '
            'Sektorscore = snitt av medlemmenes score; trend = andel over 50MA (ukentlig).</p>']
 
-    # Sektorscore
+    # Sektorscore — kort lenker til sin seksjon lenger ned
     sec = data.get("sector_summary", {})
-    out.append('<section class="section"><h2>Sektorscore</h2><div class="sector-grid">')
-    for s in sorted(sec.values(), key=lambda x: -x["avg_score"]):
-        c = s["score_col"]
-        tcol = s["trend_col"]
-        out.append(f'<div class="sc" style="border-color:{c}55">'
-                   f'<div class="sc-name">{html.escape(s["display"])}</div>'
+    # stabil anker-nøkkel per sektor (rå sektornavn -> slug)
+    def _slug(name):
+        return "sec-" + "".join(ch if ch.isalnum() else "-" for ch in name.lower())
+    out.append('<section class="section"><h2>Sektorscore</h2>'
+               '<p class="sub">Klikk på et kort for å hoppe til instrumentene i sektoren.</p>'
+               '<div class="sector-grid">')
+    sec_items = sorted(sec.items(), key=lambda kv: -kv[1]["avg_score"])
+    for raw_sec, s in sec_items:
+        c = s["score_col"]; tcol = s["trend_col"]
+        out.append(f'<a class="sc" href="#{_slug(raw_sec)}" style="border-color:{c}55">'
+                   f'<div class="sc-name">{html.escape(s["display"])} <span class="muted" style="font-weight:400">→</span></div>'
                    f'<div class="sc-score" style="color:{c}">{s["avg_score"]}</div>'
                    f'<div class="sc-label" style="color:{c}">{html.escape(s["label"])}</div>'
                    f'<div class="sc-label" style="color:{tcol}">{html.escape(s["trend_txt"])} '
                    f'<span class="muted">({s["over_ma50"]}/{s["total_ma50"]} over 50MA)</span></div>'
-                   f'<div class="sc-label muted">{s["n"]} instr.</div></div>')
+                   f'<div class="sc-label muted">{s["n"]} instr.</div></a>')
     out.append('</div></section>')
 
-    # Per-instrument
+    # Per-instrument — gruppert etter sektor (sektorer sortert etter score,
+    # instrumenter innen hver sektor sortert etter score)
     out.append('<section class="section"><h2>Instrumenter</h2>'
-               '<p class="sub">Sortert etter score. Hvert instrument viser om det slår gull '
-               '(ROC 1M/3M) med lenke til TradingView, og en interaktiv prisgraf.</p>')
+               '<p class="sub">Gruppert etter sektor. Hvert instrument viser om det slår gull '
+               '(ROC 1M/3M) med lenke til TradingView, og en interaktiv prisgraf.</p></section>')
     assets = data["assets"]
-    order = sorted([a for a in assets.values() if not a.get("missing_data")],
-                   key=lambda a: -a.get("northstar_score", 0))
     chart_init = []
-    for a in order:
-        iid = a["id"]
-        sc = a["northstar_score"]
-        lab, col = score_label(sc)
-        gb = a.get("gold_beat")
-        if gb is None:
-            gb_html = '<span class="muted">vs gull: n/a</span>'
-        elif gb.get("beats"):
-            gb_html = f'<span class="up">▲ slår gull ({"+".join(gb.get("tf_over") or [])})</span>'
-        else:
-            gb_html = '<span class="down">▼ taper mot gull</span>'
-        sym = a.get("symbol_label", iid)
-        rm = a.get("risk", {})
-        risk_str = ""
-        if rm.get("vol") is not None:
-            risk_str = (f'<span class="muted">vol {rm["vol"]:.0f}% · '
-                        f'maxDD {rm["max_dd"]:.0f}% · Sharpe {rm["sharpe"]:.2f}</span>'
-                        if rm.get("sharpe") is not None else
-                        f'<span class="muted">vol {rm["vol"]:.0f}%</span>')
-        chart_id = f"ch_{iid}"
-        chart_init.append({"el": chart_id, "series": a.get("price_series", [])})
-        out.append(
-            f'<div class="section" style="margin:10px 0">'
-            f'<div style="display:flex;flex-wrap:wrap;gap:10px;align-items:baseline">'
-            f'<h3>{html.escape(a.get("display_name", iid))}</h3>'
-            f'<span class="tag">{html.escape(sym)}</span>'
-            f'<span class="tag" style="color:{PALETTE["accent"]}">{html.escape(a.get("subclass",""))}</span>'
-            f'<span class="pill" style="background:{col}22;color:{col}">Score {sc} · {html.escape(lab)}</span>'
-            f'{gb_html}'
-            f'<a class="tv" href="{_tv(sym,"GLD")}" target="_blank" rel="noopener">📊 {html.escape(sym)}/GLD</a>'
-            f'</div>'
-            f'<div style="margin:4px 0">{risk_str}</div>'
-            f'<div class="lwc" id="{chart_id}"></div>'
-            f'</div>')
-    out.append('</section>')
+    for raw_sec, s in sec_items:
+        members = [a for a in assets.values()
+                   if not a.get("missing_data") and a.get("sector") == raw_sec]
+        members.sort(key=lambda a: -a.get("northstar_score", 0))
+        if not members:
+            continue
+        c = s["score_col"]
+        out.append(f'<h2 id="{_slug(raw_sec)}" style="scroll-margin-top:70px;border-bottom:2px solid {c}55;padding-bottom:4px">'
+                   f'{html.escape(s["display"])} '
+                   f'<span style="font-size:14px;color:{c}">snitt {s["avg_score"]} · {html.escape(s["label"])}</span> '
+                   f'<a href="#top" class="tv" style="font-size:11px;float:right">↑ topp</a></h2>')
+        for a in members:
+            iid = a["id"]
+            sc = a["northstar_score"]
+            lab, col = score_label(sc)
+            gb = a.get("gold_beat")
+            if gb is None:
+                gb_html = '<span class="muted">vs gull: n/a</span>'
+            elif gb.get("beats"):
+                gb_html = f'<span class="up">▲ slår gull ({"+".join(gb.get("tf_over") or [])})</span>'
+            else:
+                gb_html = '<span class="down">▼ taper mot gull</span>'
+            sym = a.get("symbol_label", iid)
+            rm = a.get("risk", {})
+            risk_str = ""
+            if rm.get("vol") is not None:
+                risk_str = (f'<span class="muted">vol {rm["vol"]:.0f}% · '
+                            f'maxDD {rm["max_dd"]:.0f}% · Sharpe {rm["sharpe"]:.2f}</span>'
+                            if rm.get("sharpe") is not None else
+                            f'<span class="muted">vol {rm["vol"]:.0f}%</span>')
+            chart_id = f"ch_{iid}"
+            chart_init.append({"el": chart_id, "series": a.get("price_series", [])})
+            out.append(
+                f'<div class="section" style="margin:10px 0">'
+                f'<div style="display:flex;flex-wrap:wrap;gap:10px;align-items:baseline">'
+                f'<h3>{html.escape(a.get("display_name", iid))}</h3>'
+                f'<span class="tag">{html.escape(sym)}</span>'
+                f'<span class="tag" style="color:{PALETTE["accent"]}">{html.escape(a.get("subclass",""))}</span>'
+                f'<span class="pill" style="background:{col}22;color:{col}">Score {sc} · {html.escape(lab)}</span>'
+                f'{gb_html}'
+                f'<a class="tv" href="{_tv(sym,"GLD")}" target="_blank" rel="noopener">📊 {html.escape(sym)}/GLD</a>'
+                f'</div>'
+                f'<div style="margin:4px 0">{risk_str}</div>'
+                f'<div class="lwc" id="{chart_id}"></div>'
+                f'</div>')
 
     # Charts-init (Lightweight Charts)
     out.append(layout.lwc_script())
