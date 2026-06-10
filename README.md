@@ -25,6 +25,9 @@ hardere datatrygghet (CSP, selvhostede scripts, JSON-backup, valgfri kryptering)
 | Farger | rød/grønn | **Okabe-Ito colorblind-trygg** (blå/oransje) + alltid ikon+tekst |
 | Datatrygghet | localStorage rå | **CSP, selvhostede scripts, JSON eksport/import, valgfri AES-GCM-kryptering** |
 | Portefølje | kr-kostbasis + daglig rebalansering | beholdt + risiko-KPI-er og vol-justert mål-vekt |
+| Leadership-visning | to tabeller | + **RRG-scatter** (RS-Ratio/RS-Momentum, rotasjonsgraf) |
+| Diversifisering | ingen | **Korrelasjonsmatrise** (252 dager, heatmap) |
+| Troverdighet | påstått | **Walk-forward backtest** (dual momentum + vol-skalering) vs SPY/gull |
 
 ---
 
@@ -44,13 +47,15 @@ market-analysor/
 │       ├── scoring.py               # Northstar-score (0–100)
 │       ├── analytics.py             # leadership, sjanger, bredde, par, money flow, rotasjon
 │       ├── regime.py                # makro-regime (FRED)
+│       ├── backtest.py              # walk-forward backtest av rotasjonsregelen
 │       ├── layout.py                # delt HTML/CSS/CSP
-│       ├── render.py                # Trend-oversikt + Market Daily Report
+│       ├── render.py                # Trend-oversikt + Report + RRG + korrelasjon + Backtest
 │       └── portfolio.py             # Portefølje (klientside, kryptering, backup)
 └── docs/                            # genereres → deployes til gh-pages
-    ├── index.html                   # 📈 Trend-oversikt
+    ├── index.html                   # 📈 Trend-oversikt (+ RRG + korrelasjon)
     ├── report.html                  # 📊 Market Daily Report
     ├── portfolio.html               # 💼 Portefølje
+    ├── backtest.html                # 🧪 Backtest
     ├── index.json                   # all data (minifisert)
     └── lightweight-charts...js      # selvhostet (lastes ned i bygg)
 ```
