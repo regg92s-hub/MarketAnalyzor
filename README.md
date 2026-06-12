@@ -71,6 +71,9 @@ market-analysor/
 4. **Settings → Secrets and variables → Actions**: legg til `FRED_API_KEY`
    (gratis nøkkel fra https://fredaccount.stlouisfed.org/apikeys). Uten den
    hoppes makro-regime-kortene over — alt annet virker.
+   Valgfritt: `DISCORD_WEBHOOK_URL` for push-varsel ved signalendringer
+   (Discord: Server Settings → Integrations → Webhooks → New Webhook → Copy URL).
+   Varselet sendes kun når noe faktisk flipper (sjanger, slår-gull, regime, bredde).
 5. **Actions-fanen**: kjør *Market Analysor* manuelt én gang (`Run workflow`,
    force=true). Den bygger og deployer.
 6. Siden ligger på `https://<bruker>.github.io/market-analysor/`.
