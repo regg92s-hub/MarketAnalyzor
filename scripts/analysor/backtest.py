@@ -61,11 +61,17 @@ def run_backtest(raw: dict, cyclical_ids: list, top_n: int = 5,
     rets = px.pct_change()
     gold_m = px["GLD"]
 
+    from .config import TX_COST_BPS, HYSTERESIS_ROC, BT_VOL_TARGET
+    cost_rate = TX_COST_BPS / 10000.0
+
     strat_curve = [1.0]
     spy_curve = [1.0]
     gold_curve = [1.0]
     dates = [px.index[0].strftime("%Y-%m")]
     n_hold_log = []
+    exposure_log = []
+    turnover_log = []
+    prev_holds: list = []
 
     # iterer måned for måned; signaler fra t-1, avkastning i t (ingen look-ahead)
     for t in range(13, len(px)):
@@ -89,30 +95,56 @@ def run_backtest(raw: dict, cyclical_ids: list, top_n: int = 5,
             abs12 = (abs_series.iloc[-1] / abs_series.iloc[-13] - 1) if len(abs_series) >= 13 else None
             if abs12 is None or abs12 <= 0:
                 continue  # feiler filter -> ikke eid (til cash)
-            scores[iid] = rel
-        # velg topp-N positive
-        ranked = sorted([(v, k) for k, v in scores.items() if v > 0], reverse=True)
-        holds = [k for _, k in ranked[:top_n]]
+            if rel > 0:
+                scores[iid] = rel
+
+        # Utvalg med HYSTERESE: eierposisjoner beholdes så lenge de fortsatt
+        # kvalifiserer; en utfordrer må slå svakeste eier med margin. Dette
+        # senker turnover og gjør live-resultat likere backtest.
+        incumbents = sorted([h for h in prev_holds if h in scores],
+                            key=lambda k: -scores[k])
+        challengers = sorted([k for k in scores if k not in incumbents],
+                             key=lambda k: -scores[k])
+        holds = incumbents[:top_n]
+        for cand in challengers:
+            if len(holds) < top_n:
+                holds.append(cand)
+                continue
+            weakest = min(holds, key=lambda k: scores[k])
+            if scores[cand] > scores[weakest] + HYSTERESIS_ROC:
+                holds.remove(weakest)
+                holds.append(cand)
         n_hold_log.append(len(holds))
 
-        # volatilitetsskalering: hvis universets snittvol er høy, reduser eksponering
+        # Kontinuerlig volatilitetsskalering (Moreira & Muir): eksponering =
+        # vol-mål / realisert vol, klippet til [0.3, 1.0]. Erstatter trappetrinn.
         exposure = 1.0
         try:
-            recent = rets[cyclical_ids].iloc[t - 6:t]
-            mean_vol = float(recent.std().mean() * np.sqrt(12))
-            if mean_vol > 0.35:
-                exposure = 0.5
-            elif mean_vol > 0.25:
-                exposure = 0.75
+            basket = holds if holds else ["GLD"]
+            recent = rets[basket].iloc[t - 6:t].mean(axis=1).dropna()
+            if len(recent) >= 4:
+                rvol = float(recent.std() * np.sqrt(12))
+                if rvol > 0:
+                    exposure = float(np.clip(BT_VOL_TARGET / rvol, 0.3, 1.0))
         except Exception:
             pass
+        exposure_log.append(exposure)
+
+        # Transaksjonskostnader: kostnad på handlet notional (likevekts-vekter).
+        w_prev = {h: 1.0 / len(prev_holds) for h in prev_holds} if prev_holds else {}
+        w_new = {h: 1.0 / len(holds) for h in holds} if holds else {}
+        all_ids = set(w_prev) | set(w_new)
+        turnover = sum(abs(w_new.get(i, 0.0) - w_prev.get(i, 0.0)) for i in all_ids)
+        turnover_log.append(turnover)
+        cost = turnover * cost_rate
 
         # månedens avkastning
         if holds:
             port_ret = float(rets[holds].iloc[t].mean())
         else:
             port_ret = float(rets["GLD"].iloc[t])  # ingen leder -> gull
-        port_ret *= exposure  # resten i cash (0 % avkastning antatt)
+        port_ret = port_ret * exposure - cost  # resten i cash (0 % antatt)
+        prev_holds = holds
 
         strat_curve.append(strat_curve[-1] * (1 + (port_ret if np.isfinite(port_ret) else 0)))
         spy_curve.append(spy_curve[-1] * (1 + (float(rets["SPY"].iloc[t]) if np.isfinite(rets["SPY"].iloc[t]) else 0)))
@@ -144,6 +176,10 @@ def run_backtest(raw: dict, cyclical_ids: list, top_n: int = 5,
         "start": dates[0], "end": dates[-1], "months": len(dates),
         "top_n": top_n,
         "avg_holdings": round(float(np.mean(n_hold_log)), 1) if n_hold_log else 0,
+        "tx_cost_bps": TX_COST_BPS,
+        "hysteresis_pp": round(HYSTERESIS_ROC * 100, 1),
+        "avg_exposure": round(float(np.mean(exposure_log)), 2) if exposure_log else 1.0,
+        "annual_turnover": round(float(np.mean(turnover_log)) * 12 * 100) if turnover_log else 0,
         "dates": dates,
         "strategy": {"curve": [round(v, 4) for v in strat_curve], **stats(strat_curve)},
         "spy": {"curve": [round(v, 4) for v in spy_curve], **stats(spy_curve)},
