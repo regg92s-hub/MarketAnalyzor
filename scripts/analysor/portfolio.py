@@ -24,6 +24,8 @@ def render_portfolio(data) -> str:
         "generated": data.get("generated_local"),
         "assets": {},
         "genres": data.get("genre_strength", []),
+        "fx": data.get("usdnok"),
+        "regime": ((data.get("regime") or {}).get("composite") or {}).get("state"),
     }
     for iid, a in data["assets"].items():
         if a.get("missing_data"):
@@ -76,6 +78,7 @@ Verdien følger kursutviklingen daglig. <strong>Ikke finansrådgivning.</strong>
     <div class="k"><div class="lbl">Portef.-trend (vektet score)</div><div class="val" id="kTrend">–</div></div>
     <div class="k"><div class="lbl">Andel i medvind</div><div class="val" id="kMedvind">–</div></div>
     <div class="k"><div class="lbl">Portef.-vol (est.)</div><div class="val" id="kVol">–</div></div>
+    <div class="k"><div class="lbl">USDNOK</div><div class="val" id="kFx">–</div></div>
   </div>
 </section>
 
@@ -177,8 +180,15 @@ const pct = n => n.toFixed(1)+"%";
 const nowStr = () => new Date().toLocaleString("no-NO");
 function clamp(v,a,b){ return Math.max(a,Math.min(b,v)); }
 function priceOf(id){ const a=DATA.assets[id]; return (a && a.price>0)? a.price : null; }
+function fxNow(){ return (DATA.fx && DATA.fx>0)? DATA.fx : null; }
+// Verdi i NOK = kostbasis × (USD-prisutvikling) × (USDNOK-utvikling siden kjøp).
+// Uten valutaleddet er kr-verdien feil for en norsk investor — USDNOK svinger 10-15%/år.
 function valueOf(id){ const p=STATE.positions[id]; if(!p||!p.cost) return 0;
-  const cur=priceOf(id); if(cur==null||!p.entryPrice) return p.cost; return p.cost*(cur/p.entryPrice); }
+  const cur=priceOf(id); let v=p.cost;
+  if(cur!=null && p.entryPrice) v = p.cost*(cur/p.entryPrice);
+  const fx=fxNow();
+  if(fx!=null && p.entryFx) v = v*(fx/p.entryFx);
+  return v; }
 function investedValue(){ return Object.keys(STATE.positions).reduce((s,id)=>s+valueOf(id),0); }
 function totalValue(){ return STATE.cash + investedValue(); }
 function owns(id){ const p=STATE.positions[id]; return !!(p&&p.cost>0); }
@@ -236,17 +246,35 @@ function recommendation(c, ownPct, tgt, inElig){
   return {code:"WAIT",label:"AVVENT",cls:"muted",why:`Score under ${CASH_THRESHOLD}`};
 }
 
-// ---------- Posisjonsendring (kr kostbasis + inngangspris) ----------
+// ---------- Posisjonsendring (kr kostbasis + inngangspris + inngangs-FX) ----------
 function setPosition(id, newCost){
-  const cur=priceOf(id); const p=STATE.positions[id]; const old=(p&&p.cost)?p.cost:0;
+  const cur=priceOf(id); const fx=fxNow(); const p=STATE.positions[id]; const old=(p&&p.cost)?p.cost:0;
   const a=DATA.assets[id]||{}; const name=`${a.name} (${a.sym})`;
   if(newCost<=0){ if(old>0){ const v=valueOf(id); STATE.cash+=v; delete STATE.positions[id];
     logHist(`SOLGT ${name} — frigjort ${kr(v)} (kostbasis ${kr(old)})`);} return; }
-  if(old===0){ STATE.positions[id]={cost:newCost, entryPrice:cur||null, opened:nowStr()};
-    STATE.cash-=newCost; logHist(`KJØPT ${name} for ${kr(newCost)} @ ${cur?cur.toFixed(2):"n/a"}`); }
+  if(old===0){
+    // KJØPSSJEKKLISTE (disiplin før ny posisjon) + beslutningsjournal
+    const mv = medvindGenres().has(a.sector);
+    const rsi = a.rsi??50, ob = (rsi>=OVERBOUGHT_RSI);
+    const check = `KJØPSSJEKK — ${name}\n`
+      + `${mv?'✓':'✗'} Sjanger i medvind: ${a.sector}${mv?'':' (IKKE i medvind)'}\n`
+      + `${(a.score>=CASH_THRESHOLD)?'✓':'✗'} Score ${a.score} (terskel ${CASH_THRESHOLD})\n`
+      + `${ob?'✗ Overkjøpt (RSI '+Math.round(rsi)+')':'✓ Ikke overkjøpt (RSI '+Math.round(rsi)+')'}\n`
+      + `Regime: ${DATA.regime||'ukjent'}\n\nGjennomføre kjøpet?`;
+    if(!confirm(check)) return;
+    const reason = prompt("Begrunnelse (valgfritt — lagres i journalen):") || "";
+    STATE.positions[id]={cost:newCost, entryPrice:cur||null, entryFx:fx||null, opened:nowStr()};
+    STATE.cash-=newCost;
+    // Journal: hva + hvorfor + signal-snapshot (etterprøvbar beslutningskvalitet)
+    logHist(`KJØPT ${name} for ${kr(newCost)} @ ${cur?cur.toFixed(2):"n/a"}`
+      + (fx?` (USDNOK ${fx.toFixed(2)})`:"")
+      + ` | score ${a.score}, ${a.sector}${mv?' i medvind':' IKKE i medvind'}, regime: ${DATA.regime||'?'}`
+      + (reason?` | Begrunnelse: ${reason}`:""));
+  }
   else { const diff=newCost-old;
     if(cur&&p.entryPrice&&diff>0){ const ov=valueOf(id);
       p.entryPrice=(ov+diff)/((ov/p.entryPrice)+(diff/cur)); }
+    if(fx&&!p.entryFx) p.entryFx=fx;  // migrasjon: eldre posisjoner uten FX
     p.cost=newCost; STATE.cash-=diff;
     logHist(`JUSTERT ${name}: ${kr(old)} → ${kr(newCost)} (${diff>=0?'+':''}${kr(diff)})`); }
 }
@@ -288,6 +316,8 @@ function render(){
   const me=document.getElementById("kMedvind");
   me.textContent= tw>0? pct(mv/tw*100):"–";
   document.getElementById("kVol").textContent = tw>0? (volSum/tw).toFixed(0)+"%" : "–";
+  const fxe=document.getElementById("kFx");
+  if(fxe) fxe.textContent = fxNow()? fxNow().toFixed(2) : "–";
 
   // tabell
   const ranked = cands.map(c=>{ const op=ownPctOf(c.id), tgt=weights[c.id]||0;
@@ -357,13 +387,21 @@ function bind(){
     saveState(); render();
   });
   document.getElementById("rebalance").addEventListener("click",()=>{
+    // TRANCHET omfordeling (Newfound: "litt men ofte" mot timing-flaks):
+    // ADD korrigerer 25% av avviket mot mål; KJØP åpner på halv målvekt;
+    // SKALER AV selger alt (risikokontroll tranches ikke).
+    const TRANCHE = 0.25;
     const cands=candidates(); const {weights,eligIds}=targetWeights(cands); const total=totalValue(); let ch=[];
     cands.forEach(c=>{ const op=ownPctOf(c.id), tgt=weights[c.id]||0;
       const rec=recommendation(c,op,tgt,eligIds.has(c.id)); const tgtKr=total*tgt/100;
-      if(rec.code==="BUY"&&tgt>0&&!owns(c.id)){ setPosition(c.id,Math.round(tgtKr)); ch.push(`KJØP ${c.label}`); }
-      else if(rec.code==="ADD"&&tgtKr>(STATE.positions[c.id]?.cost||0)){ setPosition(c.id,Math.round(tgtKr)); ch.push(`LEGG TIL ${c.label}`); }
+      if(rec.code==="BUY"&&tgt>0&&!owns(c.id)){
+        setPosition(c.id,Math.round(tgtKr*0.5)); ch.push(`KJØP ${c.label} (halv målvekt)`); }
+      else if(rec.code==="ADD"){
+        const v=valueOf(c.id); const gap=tgtKr-v;
+        if(gap>500){ const cost=(STATE.positions[c.id]?.cost||0);
+          setPosition(c.id,Math.round(cost+TRANCHE*gap)); ch.push(`LEGG TIL ${c.label} (1/4 av avviket)`); } }
       else if(rec.code==="SCALE"&&owns(c.id)){ setPosition(c.id,0); ch.push(`SKALER AV ${c.label}`); } });
-    logHist(ch.length? "Omfordeling: "+ch.join(", ") : "Omfordeling: ingen endringer anbefalt");
+    logHist(ch.length? "Tranchet omfordeling: "+ch.join(", ") : "Omfordeling: ingen endringer anbefalt");
     saveState(); render();
   });
   document.getElementById("clearHist").addEventListener("click",()=>{
