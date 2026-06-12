@@ -12,7 +12,7 @@ Endringer fra market-daily-report (v8 -> analysor):
   - Lightweight Charts i stedet for matplotlib-PNG-er
 """
 
-VERSION = "2026-06-10-analysor-v3"
+VERSION = "2026-06-11-analysor-v4"
 
 # ──────────────────────────────────────────────────────────────────
 # INSTRUMENT-UNIVERS
@@ -165,6 +165,14 @@ OVERBOUGHT_RSI = 65
 OVERBOUGHT_MACD = 2
 STRETCH_36 = 0.20
 VOL_TARGET_ANNUAL = 0.12  # 12 % årlig vol-mål for posisjonsstørrelse
+
+# Backtest-realisme (rapportens funn)
+TX_COST_BPS = 15          # transaksjonskostnad per handlet notional (basispunkter)
+HYSTERESIS_ROC = 0.02     # ny kandidat må slå svakeste eierposisjon med 2 pp (ROC)
+BT_VOL_TARGET = 0.20      # kontinuerlig vol-skalering: eksponering = mål/realisert (Moreira & Muir)
+
+# Tranchet rebalansering (Newfound: "litt men ofte" — reduserer timing-flaks)
+TRANCHE_FRACTION = 0.25   # korriger 25 % av avviket mot mål per omfordeling
 
 # Risikometrikker
 RISK_LOOKBACK_DAYS = 252  # 1 år for vol/Sharpe/drawdown
