@@ -163,7 +163,19 @@ def main():
         "backtest": bt,
         "regime": reg,
         "notes": {"instrument_count": len(universe)},
+        "usdnok": (round(float(raw["NOK"]["close_use"].iloc[-1]), 4)
+                   if raw.get("NOK") is not None else None),
     }
+
+    # 5b. Signal-snapshot + diff mot forrige bygg + Discord-varsel
+    snapshot = signals_snapshot(model)
+    prev = load_prev_signals()
+    changes = compute_changes(prev, snapshot)
+    model["changes"] = changes
+    with open(DOCS / "signals.json", "w", encoding="utf-8") as f:
+        json.dump(snapshot, f, ensure_ascii=False, separators=(",", ":"))
+    log(f"signals.json skrevet ({len(changes)} endringer siden forrige bygg)")
+    notify_discord(changes)
 
     # 6. Skriv index.json (minifisert -> mindre payload, gzip på toppen via Pages)
     with open(DOCS / "index.json", "w", encoding="utf-8") as f:
@@ -199,6 +211,99 @@ def ensure_lwc():
         log(f"  lagret {dest.stat().st_size} bytes")
     except Exception as e:
         log(f"  ADVARSEL: klarte ikke laste ned LWC ({e}). Grafer vil ikke vises før filen finnes.")
+
+
+# ── Signal-diff + Discord-varsling ───────────────────────────────
+def signals_snapshot(model: dict) -> dict:
+    """Kompakt snapshot av dagens signaler for diff mot neste bygg."""
+    snap = {"date": NOW.strftime("%Y-%m-%d")}
+    snap["genres"] = {g["genre"]: g["state"] for g in model.get("genre_strength", [])}
+    snap["gold_beat"] = {
+        iid: (a.get("gold_beat") or {}).get("beats")
+        for iid, a in model.get("assets", {}).items()
+        if not a.get("missing_data") and a.get("gold_beat") is not None
+    }
+    rot = model.get("rotation") or {}
+    snap["rotation_beats"] = sorted(x["id"] for x in rot.get("beats", []))
+    comp = (model.get("regime") or {}).get("composite") or {}
+    snap["regime_state"] = comp.get("state")
+    br = model.get("breadth") or {}
+    snap["breadth50"] = br.get("pct_over_50ma")
+    return snap
+
+
+def load_prev_signals() -> dict | None:
+    """Forrige byggs signaler: lokal docs/signals.json, ellers gh-pages (rå-URL)."""
+    local = DOCS / "signals.json"
+    if local.exists():
+        try:
+            return json.loads(local.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    repo = os.environ.get("GITHUB_REPOSITORY", "")
+    if repo:
+        try:
+            import requests
+            url = f"https://raw.githubusercontent.com/{repo}/gh-pages/signals.json"
+            r = requests.get(url, timeout=20)
+            if r.status_code == 200:
+                return r.json()
+        except Exception as e:
+            log(f"  klarte ikke hente forrige signals.json: {e}")
+    return None
+
+
+def compute_changes(prev: dict | None, cur: dict) -> list:
+    """Menneskelesbare endringer siden forrige bygg (norsk)."""
+    if not prev:
+        return []
+    ch = []
+    pg, cg = prev.get("genres", {}), cur.get("genres", {})
+    for genre, state in cg.items():
+        old = pg.get(genre)
+        if old is not None and old != state:
+            icon = "▲" if state == "I medvind" else ("▼" if state == "Nedadgående" else "•")
+            ch.append(f"{icon} Sjanger {genre}: {old} → {state}")
+    pb, cb = prev.get("gold_beat", {}), cur.get("gold_beat", {})
+    flipped_up = [i for i, v in cb.items() if v is True and pb.get(i) is False]
+    flipped_dn = [i for i, v in cb.items() if v is False and pb.get(i) is True]
+    if flipped_up:
+        ch.append("▲ Slår gull nå: " + ", ".join(sorted(flipped_up)))
+    if flipped_dn:
+        ch.append("▼ Taper mot gull nå: " + ", ".join(sorted(flipped_dn)))
+    if prev.get("regime_state") and cur.get("regime_state") and \
+            prev["regime_state"] != cur["regime_state"]:
+        ch.append(f"⚠ Regime: {prev['regime_state']} → {cur['regime_state']}")
+    p50, c50 = prev.get("breadth50"), cur.get("breadth50")
+    if p50 is not None and c50 is not None:
+        if p50 >= 50 > c50:
+            ch.append(f"▼ Bredde under 50% (over 50d-MA: {p50}% → {c50}%)")
+        elif p50 < 50 <= c50:
+            ch.append(f"▲ Bredde over 50% (over 50d-MA: {p50}% → {c50}%)")
+    return ch
+
+
+def notify_discord(changes: list):
+    """Send endringer til Discord-webhook (secret DISCORD_WEBHOOK_URL)."""
+    url = os.environ.get("DISCORD_WEBHOOK_URL", "").strip()
+    if not url:
+        log("Discord: ingen webhook satt (hopper over)")
+        return
+    if not changes:
+        log("Discord: ingen endringer å varsle")
+        return
+    try:
+        import requests
+        body = "**📊 Market Analysor — signalendringer " + NOW.strftime("%d.%m.%Y") + "**\n"
+        body += "\n".join(changes)
+        repo = os.environ.get("GITHUB_REPOSITORY", "")
+        if repo:
+            owner, name = repo.split("/", 1)
+            body += f"\n<https://{owner}.github.io/{name}/>"
+        r = requests.post(url, json={"content": body[:1950]}, timeout=20)
+        log(f"Discord: varsel sendt ({r.status_code})")
+    except Exception as e:
+        log(f"Discord: feil ved sending ({e})")
 
 
 if __name__ == "__main__":
