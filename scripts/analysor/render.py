@@ -41,6 +41,18 @@ def render_trend(data) -> str:
            'Relativ styrke måles med <strong>ROC/momentum</strong> på ratioen, ikke MA-kryssing — '
            'det krever ikke lang historikk og snur raskere.</p>']
 
+    # 🔔 Hva endret seg siden forrige bygg (diff av signaler)
+    changes = data.get("changes") or []
+    if changes:
+        out.append('<section class="section" style="border-color:var(--accent)">'
+                   '<h2>🔔 Endringer siden forrige bygg</h2>'
+                   '<p class="sub">Signal-flips oppdaget av generatoren — det eneste du '
+                   'trenger å vurdere i dag. Sendes også til Discord hvis webhook er satt.</p>')
+        for c in changes:
+            cls = "up" if c.startswith("▲") else ("down" if c.startswith("▼") else "warn")
+            out.append(f'<div class="{cls}" style="padding:4px 0;font-weight:600;font-size:14px">{html.escape(c)}</div>')
+        out.append('</section>')
+
     # Regime-stripe
     reg = data.get("regime", {})
     out.append('<section class="section"><h2>Makro-regime</h2>'
@@ -58,7 +70,9 @@ def render_trend(data) -> str:
         if comp:
             out.append(_regime_card("Samlet regime", comp.get("label"), comp.get("col"), comp.get("state", "")))
         for key, title in [("yield_curve", "Yield-kurve 2s10s"), ("term_spread_10y3m", "10y-3m spread"),
-                           ("fed_liquidity", "Fed-likviditet"), ("credit_spread", "Kredittspread")]:
+                           ("net_liquidity", "Net liquidity (WALCL−TGA−RRP)"),
+                           ("fed_liquidity", "Fed-likviditet"), ("credit_spread", "Kredittspread"),
+                           ("nfci", "NFCI (Chicago Fed)"), ("gpr", "Geopolitisk risiko (GPR)")]:
             r = reg.get(key)
             if r:
                 out.append(_regime_card(title, r.get("label"), r.get("col"), r.get("note", "")))
@@ -443,7 +457,11 @@ def render_backtest(data) -> str:
     s, sp, g = bt["strategy"], bt["spy"], bt["gold"]
     out.append('<section class="section"><h2>Resultater</h2>'
                f'<p class="sub">Periode {bt["start"]} → {bt["end"]} ({bt["months"]} måneder), '
-               f'topp-{bt["top_n"]}, snitt {bt["avg_holdings"]} posisjoner. Månedlig rebalansering.</p>'
+               f'topp-{bt["top_n"]}, snitt {bt["avg_holdings"]} posisjoner. Månedlig rebalansering med '
+               f'<strong>hysterese</strong> (utfordrer må slå svakeste eier med {bt.get("hysteresis_pp","–")} pp), '
+               f'<strong>transaksjonskostnad {bt.get("tx_cost_bps","–")} bps</strong> '
+               f'(årlig turnover ~{bt.get("annual_turnover","–")}%), og <strong>kontinuerlig '
+               f'vol-skalering</strong> (snitt eksponering {bt.get("avg_exposure","–")}).</p>'
                '<table><thead><tr><th>Strategi</th><th style="text-align:right">Total</th>'
                '<th style="text-align:right">CAGR</th><th style="text-align:right">Vol</th>'
                '<th style="text-align:right">Sharpe</th><th style="text-align:right">Max DD</th></tr></thead><tbody>')
