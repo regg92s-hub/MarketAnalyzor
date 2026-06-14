@@ -28,6 +28,12 @@ hardere datatrygghet (CSP, selvhostede scripts, JSON-backup, valgfri kryptering)
 | Leadership-visning | to tabeller | + **RRG-scatter** (RS-Ratio/RS-Momentum, rotasjonsgraf) |
 | Diversifisering | ingen | **Korrelasjonsmatrise** (252 dager, heatmap) |
 | Troverdighet | påstått | **Walk-forward backtest** (dual momentum + vol-skalering) vs SPY/gull |
+| Realavkastning | ingen | **Fire spor**: nominell NOK, real NOK (SSB KPI), USD, gull-unser + NOWA-excess |
+| Makro-dybde | 6 faktorer | + **realrente (TIPS), breakeven, G3-likviditet, panikk-regime** (D&M) |
+| Beslutning | spredt | **🎯 Beslutningsbilde** øverst: regime + tidslinje + endringer + dine posisjoner |
+| Alpha | momentum | + **value-tilt** (Asness) og **panikk-demper** (Daniel & Moskowitz) |
+| Automatisering | manuell | **paper-ledger** (regelen vs deg), **portfolio-synk**, **AI-morgenbrief** |
+| App | nettside | **PWA**: installerbar hjemskjerm + offline (service worker) |
 
 ---
 
@@ -74,6 +80,9 @@ market-analysor/
    Valgfritt: `DISCORD_WEBHOOK_URL` for push-varsel ved signalendringer
    (Discord: Server Settings → Integrations → Webhooks → New Webhook → Copy URL).
    Varselet sendes kun når noe faktisk flipper (sjanger, slår-gull, regime, bredde).
+   Valgfritt: `ANTHROPIC_API_KEY` for AI-generert norsk morgenbrief (Claude API).
+   Modell kan settes med `ANTHROPIC_MODEL` (default claude-haiku-4-5 — koster
+   brøkdeler av en øre per bygg). Briefen er strengt grunnet i beregnede signaler.
 5. **Actions-fanen**: kjør *Market Analysor* manuelt én gang (`Run workflow`,
    force=true). Den bygger og deployer.
 6. Siden ligger på `https://<bruker>.github.io/market-analysor/`.
@@ -125,3 +134,41 @@ inngangspris), så kake og andeler oppdateres automatisk.
 - **50-perioders signaler** er erstattet med ROC nettopp fordi de krevde for lang
   historikk; men ROC har egne svakheter (whipsaw i sidelengs marked). Les begge
   tidsrammer (1M og 3M) sammen.
+
+## v5: Realavkastning, dyp makro, semi-automatisering
+
+**Realavkastning (fire spor).** Porteføljesiden viser nå avkastning i fire mål samtidig:
+nominell NOK, real NOK (deflatert med norsk KPI fra SSB), USD (uten valutaeffekt) og
+gull-unser. Pluss en NOWA-excess-linje (meravkastning mot NOK-cash). Krever ingen
+oppsett — henter SSB KPI (PxWebApi v2) og Norges Bank USDNOK/NOWA automatisk og gratis.
+SSB byttet KPI-tabell i 2026 (ny COICOP, basisår 2025=100); tabell-ID kan overstyres med
+miljøvariabelen `SSB_KPI_TABLE` hvis SSB endrer igjen.
+
+**Dyp makro.** Regimet har fått realrente (10y TIPS), inflasjonsforventning (10y breakeven),
+G3-sentralbanklikviditet (Fed+ECB+BoJ i USD) og et panikk-regime (Daniel & Moskowitz:
+bear + høy vol = momentum-krasj-fare). G3-likviditet hadde ~1 kvartals ledelse historisk,
+men brøt sammen 2023–25 — vektes deretter.
+
+**Beslutningsbilde.** Øverst på Trend-oversikt: samlet regime, momentum-regime, endringsteller,
+benchmark-snapshot (norsk KPI, US CPI, USDNOK, NOWA), en regime-tidslinje (fargestripe over
+tid), dine posisjoner som krever handling, og "regelen vs deg".
+
+**Paper-ledger ("regelen vs deg").** En hypotetisk portefølje som mekanisk følger
+rotasjonsregelen (momentum + value, månedlig rebalansering), verdsatt daglig i NOK. Speil
+for din egen disiplin. State i `docs/paper_ledger.json`.
+
+**Portefølje-synk.** "⬆ Synk til GitHub" laster ned `portfolio.json` du kan committe til
+`docs/`. Da ser det daglige bygget posisjonene dine og Discord-varselet kan si "SPY: SKALER AV".
+NB: `docs/` er offentlig — posisjonene blir synlige. Hopp over hvis du vil holde dem private.
+
+**AI-morgenbrief.** Med `ANTHROPIC_API_KEY` skriver Claude en ~200-ords norsk kommentar i
+hvert bygg, strengt grunnet i de beregnede tallene (ingen egne tall, sier "ukjent" ved
+manglende data). Degraderer til ingenting uten nøkkel.
+
+**PWA.** Siden er nå installerbar på hjemskjerm (manifest + ikoner) og fungerer offline
+(service worker: network-first for data, cache-first for resten). Push krever server, så
+Discord forblir varselkanalen.
+
+> Verdiavhengige forbehold: backtest ≠ fremtid; dual momentum gir nedsidebeskyttelse, ikke
+> bull-meravkastning; makro-relasjoner (særlig global likviditet) er ustabile; value-tilt og
+> panikk-demper er evidensbaserte men ingen garanti. **Ikke finansrådgivning.**
