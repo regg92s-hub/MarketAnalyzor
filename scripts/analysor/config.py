@@ -12,7 +12,7 @@ Endringer fra market-daily-report (v8 -> analysor):
   - Lightweight Charts i stedet for matplotlib-PNG-er
 """
 
-VERSION = "2026-06-11-analysor-v4"
+VERSION = "2026-06-12-analysor-v5"
 
 # ──────────────────────────────────────────────────────────────────
 # INSTRUMENT-UNIVERS
@@ -169,10 +169,27 @@ VOL_TARGET_ANNUAL = 0.12  # 12 % årlig vol-mål for posisjonsstørrelse
 # Backtest-realisme (rapportens funn)
 TX_COST_BPS = 15          # transaksjonskostnad per handlet notional (basispunkter)
 HYSTERESIS_ROC = 0.02     # ny kandidat må slå svakeste eierposisjon med 2 pp (ROC)
+HYSTERESIS_Z = 0.25       # tilsvarende margin i z-score-rom (mom+value-kombinert)
 BT_VOL_TARGET = 0.20      # kontinuerlig vol-skalering: eksponering = mål/realisert (Moreira & Muir)
 
 # Tranchet rebalansering (Newfound: "litt men ofte" — reduserer timing-flaks)
 TRANCHE_FRACTION = 0.25   # korriger 25 % av avviket mot mål per omfordeling
+
+# Value-tilt i rotasjonen (Asness 2013: value+momentum er negativt korrelert,
+# kombinasjonen demper momentum-krasj og senker turnover)
+VALUE_WEIGHT = 0.5        # vekt på value-z-score relativt til momentum-z-score
+VALUE_LOOKBACK_M = 60     # value-proxy = negativ 5-års relativ avkastning (reversal)
+
+# Panikk-regime (Daniel & Moskowitz 2016: momentum krasjer i rebound etter
+# bear-marked med høy vol). Når begge er sanne: eksponering caps på 0.5.
+PANIC_RET_LOOKBACK_M = 12
+PANIC_VOL_LOOKBACK_M = 6
+PANIC_VOL_THRESHOLD = 0.25  # >25 % annualisert SPY-vol
+PANIC_EXPOSURE_CAP = 0.5
+
+# Paper-ledger ("regelen vs deg"): hypotetisk portefølje som følger regelen
+PAPER_TOP_N = 5
+PAPER_START_NOK = 100000.0
 
 # Risikometrikker
 RISK_LOOKBACK_DAYS = 252  # 1 år for vol/Sharpe/drawdown
