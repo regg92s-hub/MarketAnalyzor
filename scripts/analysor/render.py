@@ -41,6 +41,19 @@ def render_trend(data) -> str:
            'Relativ styrke måles med <strong>ROC/momentum</strong> på ratioen, ikke MA-kryssing — '
            'det krever ikke lang historikk og snur raskere.</p>']
 
+    # 🎯 DAGENS BESLUTNINGSBILDE — alt du trenger på én skjerm
+    out.append(_decision_dashboard(data))
+
+    # 🤖 AI-morgenbrief (valgfri, grunnet i signalene)
+    brief = data.get("ai_brief")
+    if brief and brief.get("text"):
+        out.append('<section class="section">'
+                   '<h2>🤖 Morgenbrief</h2>'
+                   f'<p style="font-size:14px;line-height:1.6">{html.escape(brief["text"])}</p>'
+                   f'<p class="sub" style="margin-top:6px">Generert av {html.escape(brief.get("model","AI"))} '
+                   'fra dagens beregnede signaler. Kan inneholde feil — ikke finansrådgivning.</p>'
+                   '</section>')
+
     # 🔔 Hva endret seg siden forrige bygg (diff av signaler)
     changes = data.get("changes") or []
     if changes:
@@ -56,8 +69,9 @@ def render_trend(data) -> str:
     # Regime-stripe
     reg = data.get("regime", {})
     out.append('<section class="section"><h2>Makro-regime</h2>'
-               '<p class="sub">NFTRH-kontekst: renteregime, Fed-likviditet og kredittspreader. '
-               'Regime-score = andel risk-on-faktorer (yield-kurve positiv, likviditet inn, spreader stramme).</p>')
+               '<p class="sub">NFTRH-kontekst: renteregime, likviditet (net + global), realrente, '
+               'kredittspreader, finansielle forhold og geopolitikk. '
+               'Regime-score = andel risk-on-faktorer.</p>')
     if not reg:
         out.append('<div class="sc" style="border-color:#E69F0055">'
                    '<div class="sc-name warn">⚠ Makro-regime mangler data</div>'
@@ -71,8 +85,11 @@ def render_trend(data) -> str:
             out.append(_regime_card("Samlet regime", comp.get("label"), comp.get("col"), comp.get("state", "")))
         for key, title in [("yield_curve", "Yield-kurve 2s10s"), ("term_spread_10y3m", "10y-3m spread"),
                            ("net_liquidity", "Net liquidity (WALCL−TGA−RRP)"),
+                           ("global_liquidity", "G3-likviditet (Fed+ECB+BoJ)"),
+                           ("real_rate", "Realrente 10y (TIPS)"), ("breakeven", "Inflasjonsforv. 10y"),
                            ("fed_liquidity", "Fed-likviditet"), ("credit_spread", "Kredittspread"),
-                           ("nfci", "NFCI (Chicago Fed)"), ("gpr", "Geopolitisk risiko (GPR)")]:
+                           ("nfci", "NFCI (Chicago Fed)"), ("panic", "Momentum-regime"),
+                           ("gpr", "Geopolitisk risiko (GPR)")]:
             r = reg.get(key)
             if r:
                 out.append(_regime_card(title, r.get("label"), r.get("col"), r.get("note", "")))
@@ -172,6 +189,128 @@ def render_trend(data) -> str:
 
     out.append(layout.foot())
     return "".join(out)
+
+
+def _decision_dashboard(data) -> str:
+    """🎯 Dagens beslutningsbilde: regime + tidslinje + endringer + dine posisjoner
+    + paper-vs-deg + benchmark-snapshot. Alt på én skjerm, øverst."""
+    reg = data.get("regime", {})
+    comp = reg.get("composite", {})
+    panic = reg.get("panic", {})
+    changes = data.get("changes") or []
+    uv = data.get("user_portfolio")
+    paper = data.get("paper", {})
+    bench = data.get("benchmarks", {})
+
+    parts = ['<section class="section" style="border:2px solid var(--accent)">'
+             '<h2>🎯 Dagens beslutningsbilde</h2>']
+
+    # Rad 1: regime-status + momentum-regime + endringsteller
+    score = comp.get("score")
+    scol = comp.get("col", PALETTE["muted"])
+    sstate = comp.get("state", "ukjent")
+    n_chg = len(changes)
+    chg_col = PALETTE["warn"] if n_chg else PALETTE["good"]
+    pflag = panic.get("panic")
+    pstr = ("⚠ PANIKK" if pflag else "Normalt") if panic else "n/a"
+    pcol = PALETTE["down"] if pflag else PALETTE["up"]
+    parts.append('<div class="kpi">'
+                 f'<div class="k"><div class="lbl">Makro-regime</div>'
+                 f'<div class="val" style="color:{scol}">{html.escape(sstate)}</div>'
+                 f'<div class="sc-label muted">{score if score is not None else "–"}/100</div></div>'
+                 f'<div class="k"><div class="lbl">Momentum-regime</div>'
+                 f'<div class="val" style="color:{pcol};font-size:16px">{pstr}</div>'
+                 f'<div class="sc-label muted">D&amp;M krasj-vakt</div></div>'
+                 f'<div class="k"><div class="lbl">Endringer i dag</div>'
+                 f'<div class="val" style="color:{chg_col}">{n_chg}</div>'
+                 f'<div class="sc-label muted">signal-flips</div></div>')
+    # Benchmark-snapshot
+    if bench:
+        kpi_no = bench.get("kpi_no_yoy")
+        cpi_us = bench.get("cpi_us_yoy")
+        nowa = bench.get("nowa")
+        ux = bench.get("usdnok")
+        fx = ux[-1][1] if ux else None
+        if kpi_no is not None:
+            parts.append(f'<div class="k"><div class="lbl">Norsk KPI (12m)</div>'
+                         f'<div class="val">{kpi_no:.1f}%</div>'
+                         f'<div class="sc-label muted">realavk.-hinder</div></div>')
+        if cpi_us is not None:
+            parts.append(f'<div class="k"><div class="lbl">US CPI (12m)</div>'
+                         f'<div class="val">{cpi_us:.1f}%</div></div>')
+        if fx is not None:
+            parts.append(f'<div class="k"><div class="lbl">USDNOK</div>'
+                         f'<div class="val">{fx:.2f}</div></div>')
+        if nowa is not None:
+            parts.append(f'<div class="k"><div class="lbl">NOWA (risikofri)</div>'
+                         f'<div class="val">{nowa:.2f}%</div></div>')
+    parts.append('</div>')
+
+    # Regime-tidslinje (stripe over tid)
+    parts.append(_regime_timeline(data.get("regime_history", {})))
+
+    # Rad 2: dine posisjoner som krever handling
+    if uv and uv.get("rows"):
+        actions = [r for r in uv["rows"] if r["verdict"] in ("SKALER AV", "VURDER SKALER AV")]
+        parts.append('<h3 style="margin-top:14px">Dine posisjoner</h3>')
+        if actions:
+            parts.append('<p class="sub">Krever vurdering i dag:</p>')
+            for r in actions:
+                col = PALETTE["down"] if r["verdict"] == "SKALER AV" else PALETTE["warn"]
+                parts.append(f'<div style="padding:3px 0;font-weight:600;color:{col}">'
+                             f'{html.escape(r["sym"])}: {html.escape(r["verdict"])} '
+                             f'<span class="muted" style="font-weight:400">({html.escape(r["why"])}, '
+                             f'verdi {r["value_nok"]:,.0f} kr, {r["pnl_pct"]:+.1f}%)</span></div>')
+        else:
+            parts.append('<p class="sub">Ingen posisjoner krever handling i dag '
+                         f'(total {uv.get("total_nok",0):,.0f} kr).</p>')
+    else:
+        parts.append('<p class="sub" style="margin-top:14px">💡 Synk porteføljen din '
+                     '(docs/portfolio.json) for å se posisjons-varsler her og i Discord.</p>')
+
+    # Rad 3: regelen vs deg
+    curve = paper.get("curve") or []
+    actual = paper.get("actual_curve") or []
+    if curve:
+        start = paper.get("start_nok") or 100000
+        rule_now = curve[-1][1]
+        rule_ret = (rule_now / start - 1) * 100
+        line = (f'Regelen (paper): <strong style="color:{PALETTE["up"] if rule_ret>=0 else PALETTE["down"]}">'
+                f'{rule_ret:+.1f}%</strong> siden {curve[0][0]}')
+        if actual and uv:
+            # felles startpunkt-sammenligning er upresis; vis bare nivåer
+            line += f' · din portefølje nå: {uv.get("total_nok",0):,.0f} kr'
+        parts.append(f'<h3 style="margin-top:14px">Regelen vs. deg</h3>'
+                     f'<p class="sub">{line}. Hypotetisk regelportefølje som rebalanserer '
+                     'mekanisk månedlig — speil for din egen disiplin.</p>')
+
+    parts.append('</section>')
+    return "".join(parts)
+
+
+def _regime_timeline(rhist) -> str:
+    """Fargestripe av composite regime-score over tid (grønn/oransje/rød bånd)."""
+    scores = (rhist or {}).get("scores", [])
+    dates = (rhist or {}).get("dates", [])
+    if len(scores) < 3:
+        return ('<p class="sub" style="margin-top:8px">Regime-tidslinje bygges opp '
+                'etter hvert som daglige bygg kjører.</p>')
+    n = len(scores)
+    W, H = 100.0, 26.0
+    bw = W / n
+    bars = []
+    for i, s in enumerate(scores):
+        col = PALETTE["up"] if s >= 66 else (PALETTE["warn"] if s >= 34 else PALETTE["down"])
+        x = i * bw
+        bars.append(f'<rect x="{x:.3f}" y="0" width="{bw+0.5:.3f}" height="{H}" fill="{col}"/>')
+    d0 = html.escape(dates[0]) if dates else ""
+    d1 = html.escape(dates[-1]) if dates else ""
+    return ('<h3 style="margin-top:14px">Regime-tidslinje</h3>'
+            f'<svg viewBox="0 0 {W} {H}" width="100%" height="26" preserveAspectRatio="none" '
+            f'style="border-radius:6px;display:block">{"".join(bars)}</svg>'
+            f'<div style="display:flex;justify-content:space-between" class="sub">'
+            f'<span>{d0}</span><span class="muted">grønn=risk-on · oransje=overgang · rød=risk-off</span>'
+            f'<span>{d1}</span></div>')
 
 
 def _regime_card(title, label, col, note):
@@ -458,10 +597,12 @@ def render_backtest(data) -> str:
     out.append('<section class="section"><h2>Resultater</h2>'
                f'<p class="sub">Periode {bt["start"]} → {bt["end"]} ({bt["months"]} måneder), '
                f'topp-{bt["top_n"]}, snitt {bt["avg_holdings"]} posisjoner. Månedlig rebalansering med '
-               f'<strong>hysterese</strong> (utfordrer må slå svakeste eier med {bt.get("hysteresis_pp","–")} pp), '
+               f'<strong>value-tilt</strong> (vekt {bt.get("value_weight","–")} på reversal, Asness), '
+               f'<strong>hysterese</strong> (z-margin {bt.get("hysteresis_z","–")}), '
                f'<strong>transaksjonskostnad {bt.get("tx_cost_bps","–")} bps</strong> '
-               f'(årlig turnover ~{bt.get("annual_turnover","–")}%), og <strong>kontinuerlig '
-               f'vol-skalering</strong> (snitt eksponering {bt.get("avg_exposure","–")}).</p>'
+               f'(årlig turnover ~{bt.get("annual_turnover","–")}%), <strong>kontinuerlig vol-skalering</strong> '
+               f'(snitt eksp. {bt.get("avg_exposure","–")}) og <strong>panikk-demper</strong> '
+               f'({bt.get("panic_months","–")} måneder dempet, Daniel &amp; Moskowitz).</p>'
                '<table><thead><tr><th>Strategi</th><th style="text-align:right">Total</th>'
                '<th style="text-align:right">CAGR</th><th style="text-align:right">Vol</th>'
                '<th style="text-align:right">Sharpe</th><th style="text-align:right">Max DD</th></tr></thead><tbody>')
