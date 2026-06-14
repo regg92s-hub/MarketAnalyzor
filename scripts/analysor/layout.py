@@ -116,11 +116,21 @@ def head(title: str, active: int) -> str:
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta http-equiv="Content-Security-Policy" content="{CSP}">
 <meta name="referrer" content="no-referrer">
+<meta name="theme-color" content="#0b0d10">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icon-192.png">
 <title>{title} — market-analysor</title>
 <style>{css()}</style>
 </head>
 <body><div class="wrap">
 {nav}
+<script>
+if ('serviceWorker' in navigator) {{
+  window.addEventListener('load', function() {{
+    try {{ navigator.serviceWorker.register('sw.js'); }} catch (e) {{}}
+  }});
+}}
+</script>
 """
 
 
