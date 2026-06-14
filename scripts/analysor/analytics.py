@@ -240,3 +240,36 @@ def build_correlation(raw):
     from .config import CORR_SET
     closes = {iid: raw[iid]["close_use"] for iid in CORR_SET if iid in raw}
     return ind.correlation_matrix(closes)
+
+
+def panic_state(raw):
+    """
+    Panikk-regime (Daniel & Moskowitz 2016): momentum krasjer i rebound etter
+    bear-marked med høy volatilitet. Flagg = SPY 12M-avkastning < 0 OG
+    realisert 6M-vol > terskel. Når flagget er på, dempes rotasjons-
+    aggressivitet (eksponering caps).
+    """
+    from .config import (PANIC_RET_LOOKBACK_M, PANIC_VOL_LOOKBACK_M,
+                         PANIC_VOL_THRESHOLD, PALETTE)
+    spy = raw.get("SPY")
+    if spy is None:
+        return None
+    c = spy["close_use"].dropna()
+    m = c.resample("ME").last().dropna()
+    if len(m) < PANIC_RET_LOOKBACK_M + 2:
+        return None
+    ret12 = float(m.iloc[-1] / m.iloc[-1 - PANIC_RET_LOOKBACK_M] - 1)
+    daily = c.pct_change().dropna().tail(PANIC_VOL_LOOKBACK_M * 21)
+    if len(daily) < 40:
+        return None
+    vol = float(daily.std() * (252 ** 0.5))
+    panic = (ret12 < 0) and (vol > PANIC_VOL_THRESHOLD)
+    return {
+        "label": (f"PANIKK-REGIME (SPY 12m {ret12*100:+.0f}%, vol {vol*100:.0f}%)" if panic
+                  else f"Normalt (SPY 12m {ret12*100:+.0f}%, vol {vol*100:.0f}%)"),
+        "col": PALETTE["down"] if panic else PALETTE["up"],
+        "note": ("Bear + høy vol: momentum-krasj-fare — eksponering dempes til 50% "
+                 "(Daniel & Moskowitz 2016)" if panic
+                 else "Ikke panikk-tilstand — full regelstyrt eksponering"),
+        "panic": panic, "ret_12m": round(ret12 * 100, 1), "vol_6m": round(vol * 100, 1),
+    }
