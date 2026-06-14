@@ -119,6 +119,12 @@ def build_regime(api_key: str) -> dict:
     tga = fetch_fred_series("WTREGEN", api_key)       # Treasury General Account
     rrp = fetch_fred_series("RRPONTSYD", api_key)     # Overnight Reverse Repo
     nfci = fetch_fred_series("NFCI", api_key)         # Chicago Fed Financial Conditions
+    dfii = fetch_fred_series("DFII10", api_key)       # 10y TIPS-realrente
+    bei = fetch_fred_series("T10YIE", api_key)        # 10y inflasjonsforventning
+    ecb = fetch_fred_series("ECBASSETSW", api_key)    # ECB-balanse (EUR mn)
+    boj = fetch_fred_series("JPNASSETS", api_key)     # BoJ-balanse (100 mn yen)
+    eurusd = fetch_fred_series("DEXUSEU", api_key)    # USD per EUR
+    jpyusd = fetch_fred_series("DEXJPUS", api_key)    # JPY per USD
 
     # 2s10s
     if s2 is not None and s10 is not None:
@@ -215,6 +221,66 @@ def build_regime(api_key: str) -> dict:
             "col": col, "note": note, "value": round(last, 3),
         }
 
+    # Realrente (10y TIPS) — direkte relevant for gull-baseline: gull følger
+    # realrenter invers. Fallende realrente = medvind for gull/hard assets.
+    if dfii is not None:
+        d = dfii.dropna()
+        last = float(d.iloc[-1])
+        chg_3m = last - float(d.iloc[-63]) if len(d) > 63 else 0.0
+        falling = chg_3m < 0
+        regime["real_rate"] = {
+            "label": f"Realrente 10y: {last:.2f}% ({chg_3m:+.2f} 3m)",
+            "col": PALETTE["warn"] if falling else PALETTE["up"],
+            "note": ("Fallende realrente — medvind for gull/hard assets" if falling
+                     else "Stigende realrente — motvind for gull, støtte for USD"),
+            "value": round(last, 2),
+        }
+
+    # Inflasjonsforventning (10y breakeven)
+    if bei is not None:
+        b = bei.dropna()
+        last = float(b.iloc[-1])
+        chg_3m = last - float(b.iloc[-63]) if len(b) > 63 else 0.0
+        regime["breakeven"] = {
+            "label": f"Breakeven 10y: {last:.2f}% ({chg_3m:+.2f} 3m)",
+            "col": PALETTE["warn"] if last > 2.5 else PALETTE["up"],
+            "note": ("Inflasjonsforventninger over komfortsonen" if last > 2.5
+                     else "Forankrede inflasjonsforventninger"),
+            "value": round(last, 2),
+        }
+
+    # Global sentralbanklikviditet (G3: Fed + ECB + BoJ i USD). Dokumentert
+    # ~1 kvartals ledelse på risikoaktiva historisk, MEN forholdet brøt sammen
+    # 2023–2025 (TGA/RRP dominerte) — presenteres som én input, ikke orakel.
+    if walcl is not None and ecb is not None and eurusd is not None:
+        try:
+            fed_tn = walcl.dropna() / 1e6            # mn USD -> tn USD
+            ecb_tn = (ecb.dropna() / 1e6)            # mn EUR -> tn EUR
+            eu = eurusd.dropna()
+            comb = pd.DataFrame({"f": fed_tn, "e": ecb_tn, "x": eu}).ffill().dropna()
+            g = comb["f"] + comb["e"] * comb["x"]
+            if boj is not None and jpyusd is not None:
+                bj = (boj.dropna() * 100 / 1e6)      # 100mn JPY -> tn JPY
+                jp = jpyusd.dropna()
+                c2 = pd.DataFrame({"g": g, "b": bj, "j": jp}).ffill().dropna()
+                g = c2["g"] + c2["b"] / c2["j"]
+            gw = g.resample("W-WED").last().dropna()
+            if len(gw) > 27:
+                chg_6m = (float(gw.iloc[-1]) / float(gw.iloc[-27]) - 1.0) * 100
+                rising = chg_6m > 0
+                regime["global_liquidity"] = {
+                    "label": f"G3-likviditet: {gw.iloc[-1]:.1f} tn$ ({chg_6m:+.1f}% 6m)",
+                    "col": PALETTE["up"] if rising else PALETTE["down"],
+                    "note": ("Global sentralbanklikviditet ekspanderer (~1 kvartals ledelse "
+                             "historisk — men brøt sammen 2023–25, vekt deretter)" if rising
+                             else "Global likviditet krymper — strukturell motvind"),
+                    "chg_6m": round(chg_6m, 2),
+                    "series": [(d.strftime("%Y-%m-%d"), round(float(v), 2))
+                               for d, v in gw.tail(180).items()],
+                }
+        except Exception as e:
+            _log(f"  global likviditet feil: {e}")
+
     # Geopolitisk risiko (Caldara-Iacoviello GPR, månedlig, gratis nedlasting).
     # Kontekst-kort, ikke timing-signal: brukes som forsterker sammen med
     # kredittspreader, ikke alene.
@@ -235,6 +301,8 @@ def build_regime(api_key: str) -> dict:
         factors.append(0.0 if "utvider" in regime["credit_spread"]["note"] else 1.0)
     if "nfci" in regime:
         factors.append(1.0 if regime["nfci"]["value"] < 0 else 0.0)
+    if "global_liquidity" in regime:
+        factors.append(1.0 if regime["global_liquidity"]["chg_6m"] > 0 else 0.0)
     if factors:
         score = round(sum(factors) / len(factors) * 100)
         if score >= 66:
