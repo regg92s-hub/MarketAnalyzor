@@ -23,7 +23,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import pandas as pd  # noqa: E402
-from analysor import config, data as datamod, scoring, analytics, regime as regimemod, render, portfolio, backtest as backtestmod  # noqa: E402
+from analysor import config, data as datamod, scoring, analytics, regime as regimemod, render, portfolio, backtest as backtestmod, benchmarks as benchmarksmod, paper  # noqa: E402
 from analysor.config import VERSION, PALETTE  # noqa: E402
 from analysor.layout import LWC_CDN, LWC_LOCAL  # noqa: E402
 from analysor import indicators as ind  # noqa: E402
@@ -144,6 +144,41 @@ def main():
     corr = analytics.build_correlation(raw)
     bt = backtestmod.run_backtest(raw, config.CYCLICAL_IDS, top_n=5)
     reg = regimemod.build_regime(os.environ.get("FRED_API_KEY", ""))
+    # Panikk-tilstand (Daniel & Moskowitz) inn i regimet
+    pstate = analytics.panic_state(raw)
+    if pstate:
+        reg["panic"] = pstate
+
+    # Benchmarks: norsk KPI (SSB), USDNOK/NOWA (Norges Bank), US CPI, gull
+    bench = benchmarksmod.build_benchmarks(
+        raw, regimemod.fetch_fred_series, os.environ.get("FRED_API_KEY", ""))
+
+    # Regime-historikk: append dagens composite-score -> tidslinje-stripe
+    today = NOW.strftime("%Y-%m-%d")
+    rhist = load_prev_json("regime_history.json") or {"dates": [], "scores": [], "states": []}
+    comp = reg.get("composite") or {}
+    if comp.get("score") is not None and (not rhist["dates"] or rhist["dates"][-1] != today):
+        rhist["dates"].append(today)
+        rhist["scores"].append(comp["score"])
+        rhist["states"].append(comp.get("state", ""))
+        for k in ("dates", "scores", "states"):
+            rhist[k] = rhist[k][-365:]
+    with open(DOCS / "regime_history.json", "w", encoding="utf-8") as f:
+        json.dump(rhist, f, separators=(",", ":"))
+
+    # Paper-ledger ("regelen vs deg") + brukerens synkede portefølje
+    usdnok_now = (round(float(raw["NOK"]["close_use"].iloc[-1]), 4)
+                  if raw.get("NOK") is not None else None)
+    ledger = paper.update_paper_ledger(
+        load_prev_json("paper_ledger.json"), raw, config.CYCLICAL_IDS, usdnok_now, today)
+    user_pf_raw = load_user_portfolio()
+    user_val = paper.value_user_portfolio(user_pf_raw, raw, usdnok_now, assets)
+    if user_val:
+        ledger["actual_curve"] = (ledger.get("actual_curve") or [])[-730:]
+        if not ledger["actual_curve"] or ledger["actual_curve"][-1][0] != today:
+            ledger["actual_curve"].append((today, user_val["total_nok"]))
+    with open(DOCS / "paper_ledger.json", "w", encoding="utf-8") as f:
+        json.dump(ledger, f, separators=(",", ":"))
 
     # 5. Samlet datamodell
     model = {
@@ -162,6 +197,14 @@ def main():
         "correlation": corr,
         "backtest": bt,
         "regime": reg,
+        "benchmarks": bench,
+        "regime_history": rhist,
+        "paper": {"curve": ledger.get("curve", [])[-400:],
+                  "actual_curve": ledger.get("actual_curve", [])[-400:],
+                  "events": ledger.get("events", [])[-6:],
+                  "positions": sorted(ledger.get("positions", {}).keys()),
+                  "start_nok": ledger.get("start_nok")},
+        "user_portfolio": user_val,
         "notes": {"instrument_count": len(universe)},
         "usdnok": (round(float(raw["NOK"]["close_use"].iloc[-1]), 4)
                    if raw.get("NOK") is not None else None),
@@ -175,7 +218,11 @@ def main():
     with open(DOCS / "signals.json", "w", encoding="utf-8") as f:
         json.dump(snapshot, f, ensure_ascii=False, separators=(",", ":"))
     log(f"signals.json skrevet ({len(changes)} endringer siden forrige bygg)")
-    notify_discord(changes)
+    notify_discord(changes, user_val)
+
+    # AI-morgenbrief (valgfri, krever ANTHROPIC_API_KEY) — strengt grunnet
+    # i beregnede signaler, aldri egne tall.
+    model["ai_brief"] = build_ai_brief(model)
 
     # 6. Skriv index.json (minifisert -> mindre payload, gzip på toppen via Pages)
     with open(DOCS / "index.json", "w", encoding="utf-8") as f:
@@ -191,6 +238,10 @@ def main():
 
     # 8. Selvhost Lightweight Charts (last ned hvis mangler)
     ensure_lwc()
+
+    # 8b. PWA-ressurser (manifest, service worker, ikoner) — installerbar
+    # hjemskjerm + offline. Push krever server -> Discord forblir varselkanal.
+    write_pwa_assets()
 
     # 9. .nojekyll så GitHub Pages ikke prosesserer
     (DOCS / ".nojekyll").write_text("", encoding="utf-8")
@@ -232,9 +283,9 @@ def signals_snapshot(model: dict) -> dict:
     return snap
 
 
-def load_prev_signals() -> dict | None:
-    """Forrige byggs signaler: lokal docs/signals.json, ellers gh-pages (rå-URL)."""
-    local = DOCS / "signals.json"
+def load_prev_json(name: str) -> dict | None:
+    """Hent en JSON-fil fra forrige bygg: lokal docs/<name>, ellers gh-pages rå-URL."""
+    local = DOCS / name
     if local.exists():
         try:
             return json.loads(local.read_text(encoding="utf-8"))
@@ -244,13 +295,96 @@ def load_prev_signals() -> dict | None:
     if repo:
         try:
             import requests
-            url = f"https://raw.githubusercontent.com/{repo}/gh-pages/signals.json"
+            url = f"https://raw.githubusercontent.com/{repo}/gh-pages/{name}"
             r = requests.get(url, timeout=20)
             if r.status_code == 200:
                 return r.json()
         except Exception as e:
-            log(f"  klarte ikke hente forrige signals.json: {e}")
+            log(f"  klarte ikke hente forrige {name}: {e}")
     return None
+
+
+def load_prev_signals() -> dict | None:
+    """Forrige byggs signaler (spesialtilfelle av load_prev_json)."""
+    return load_prev_json("signals.json")
+
+
+def load_user_portfolio() -> dict | None:
+    """
+    Brukerens synkede portefølje fra docs/portfolio.json (committet via
+    eksport-knappen på porteføljesiden). Leses kun fra repoet (main-branch
+    checkout under bygg) — aldri fra klienten. Mangler den, kjøres alt uten.
+    """
+    p = DOCS.parent / "docs" / "portfolio.json"
+    # docs/portfolio.json ligger i repoet (ikke generert) -> sjekk repo-roten
+    candidates = [DOCS / "portfolio.json", Path(__file__).resolve().parent.parent / "docs" / "portfolio.json"]
+    for c in candidates:
+        if c.exists():
+            try:
+                return json.loads(c.read_text(encoding="utf-8"))
+            except Exception:
+                pass
+    return None
+
+
+def build_ai_brief(model: dict) -> dict | None:
+    """
+    AI-morgenbrief på norsk (~150-220 ord), strengt grunnet i beregnede signaler.
+    Krever ANTHROPIC_API_KEY. Modell via ANTHROPIC_MODEL (default haiku).
+    Degraderer til None uten nøkkel eller ved enhver feil.
+    """
+    key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+    if not key:
+        log("AI-brief: ingen ANTHROPIC_API_KEY (hopper over)")
+        return None
+    try:
+        import requests
+        reg = model.get("regime", {})
+        comp = reg.get("composite", {})
+        # Kompakt, FAKTISK signal-subsett — modellen får KUN disse tallene
+        facts = {
+            "regime": {"state": comp.get("state"), "score": comp.get("score"),
+                       "kort": {k: v.get("label") for k, v in reg.items()
+                                if isinstance(v, dict) and "label" in v}},
+            "endringer": model.get("changes", []),
+            "ledere_mot_gull": [r["label"] for r in model.get("ranking_gold", {}).get("rows", [])[:5]
+                                if r.get("beats")],
+            "sjangrer_medvind": [g["genre"] for g in model.get("genre_strength", [])
+                                 if g.get("medvind")],
+            "bredde_50": model.get("breadth", {}).get("pct_over_50ma"),
+            "paper_vs_start": {
+                "start": model.get("paper", {}).get("start_nok"),
+                "naa": (model.get("paper", {}).get("curve") or [[None, None]])[-1][1]},
+        }
+        sys_prompt = (
+            "Du er en nøktern norsk markedsanalytiker. Skriv en morgenbrief på 150-220 ord "
+            "basert UTELUKKENDE på de oppgitte tallene. Ikke finn på tall, priser eller "
+            "hendelser. Si 'ukjent' hvis noe mangler. Vev regime, endringer, ledere mot gull "
+            "og bredde til en sammenhengende tekst. Avslutt med 'Ikke finansrådgivning.' "
+            "Ingen punktlister, kun prosa.")
+        payload = {
+            "model": os.environ.get("ANTHROPIC_MODEL", "claude-haiku-4-5"),
+            "max_tokens": 600,
+            "system": sys_prompt,
+            "messages": [{"role": "user",
+                          "content": "Signaler i dag (JSON):\n" + json.dumps(facts, ensure_ascii=False)}],
+        }
+        r = requests.post("https://api.anthropic.com/v1/messages",
+                          headers={"x-api-key": key, "anthropic-version": "2023-06-01",
+                                   "content-type": "application/json"},
+                          json=payload, timeout=40)
+        if r.status_code != 200:
+            log(f"AI-brief: API {r.status_code} (hopper over)")
+            return None
+        text = "".join(b.get("text", "") for b in r.json().get("content", [])
+                       if b.get("type") == "text").strip()
+        if not text:
+            return None
+        log(f"AI-brief: generert ({len(text)} tegn)")
+        return {"text": text, "model": payload["model"], "date": NOW.strftime("%Y-%m-%d")}
+    except Exception as e:
+        log(f"AI-brief: feil ({e})")
+        return None
 
 
 def compute_changes(prev: dict | None, cur: dict) -> list:
@@ -283,19 +417,28 @@ def compute_changes(prev: dict | None, cur: dict) -> list:
     return ch
 
 
-def notify_discord(changes: list):
-    """Send endringer til Discord-webhook (secret DISCORD_WEBHOOK_URL)."""
+def notify_discord(changes: list, user_val: dict | None = None):
+    """Send endringer + dine posisjons-verdikter til Discord (DISCORD_WEBHOOK_URL)."""
     url = os.environ.get("DISCORD_WEBHOOK_URL", "").strip()
     if not url:
         log("Discord: ingen webhook satt (hopper over)")
         return
-    if not changes:
+    # Posisjoner som krever handling (SKALER AV / VURDER SKALER AV)
+    action_lines = []
+    if user_val:
+        for r in user_val.get("rows", []):
+            if r["verdict"] in ("SKALER AV", "VURDER SKALER AV"):
+                action_lines.append(f"• {r['sym']}: {r['verdict']} ({r['why']})")
+    if not changes and not action_lines:
         log("Discord: ingen endringer å varsle")
         return
     try:
         import requests
-        body = "**📊 Market Analysor — signalendringer " + NOW.strftime("%d.%m.%Y") + "**\n"
-        body += "\n".join(changes)
+        body = "**📊 Market Analysor — " + NOW.strftime("%d.%m.%Y") + "**\n"
+        if changes:
+            body += "\n".join(changes)
+        if action_lines:
+            body += "\n\n**Dine posisjoner:**\n" + "\n".join(action_lines)
         repo = os.environ.get("GITHUB_REPOSITORY", "")
         if repo:
             owner, name = repo.split("/", 1)
@@ -304,6 +447,83 @@ def notify_discord(changes: list):
         log(f"Discord: varsel sendt ({r.status_code})")
     except Exception as e:
         log(f"Discord: feil ved sending ({e})")
+
+
+def write_pwa_assets():
+    """Skriv manifest, service worker og to ikoner (PWA-installasjon + offline)."""
+    manifest = {
+        "name": "MarketAnalyzor", "short_name": "Analysor",
+        "start_url": ".", "scope": ".", "display": "standalone",
+        "background_color": "#0b0d10", "theme_color": "#0b0d10",
+        "description": "Gull-relativt, regime-basert markeds-dashboard",
+        "icons": [
+            {"src": "icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any maskable"},
+            {"src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable"},
+        ],
+    }
+    (DOCS / "manifest.webmanifest").write_text(json.dumps(manifest), encoding="utf-8")
+
+    # Service worker: network-first for data (.json), cache-first for resten.
+    sw = """const CACHE = 'analysor-v5';
+const CORE = ['./','./index.html','./report.html','./portfolio.html','./backtest.html',
+  './lightweight-charts.standalone.production.js','./manifest.webmanifest'];
+self.addEventListener('install', e => {
+  e.waitUntil(caches.open(CACHE).then(c => c.addAll(CORE)).then(()=>self.skipWaiting()));
+});
+self.addEventListener('activate', e => {
+  e.waitUntil(caches.keys().then(ks => Promise.all(
+    ks.filter(k => k !== CACHE).map(k => caches.delete(k)))).then(()=>self.clients.claim()));
+});
+self.addEventListener('fetch', e => {
+  const url = e.request.url;
+  if (url.endsWith('.json')) {                       // data: network-first
+    e.respondWith(fetch(e.request).then(r => {
+      const cp = r.clone(); caches.open(CACHE).then(c => c.put(e.request, cp)); return r;
+    }).catch(() => caches.match(e.request)));
+  } else {                                           // shell: cache-first
+    e.respondWith(caches.match(e.request).then(r => r || fetch(e.request)));
+  }
+});
+"""
+    (DOCS / "sw.js").write_text(sw, encoding="utf-8")
+
+    # Ikoner: ren-Python PNG (ingen Pillow). Mørk bakgrunn + blå trekant (opp).
+    _write_icon_png(DOCS / "icon-192.png", 192)
+    _write_icon_png(DOCS / "icon-512.png", 512)
+    log("PWA-ressurser skrevet (manifest, sw.js, ikoner)")
+
+
+def _write_icon_png(path: Path, size: int):
+    """Skriv en enkel PNG uten eksterne biblioteker (zlib + struct + CRC)."""
+    import struct
+    import zlib
+    bg = (11, 13, 16)       # --bg
+    blue = (0, 114, 178)    # Okabe-Ito blå
+    cx = size / 2
+    # Trekant (pilspiss opp) sentrert
+    top_y, base_y = size * 0.26, size * 0.74
+    half = size * 0.26
+    rows = bytearray()
+    for y in range(size):
+        rows.append(0)  # filter-byte per rad
+        for x in range(size):
+            r, g, b = bg
+            if top_y <= y <= base_y:
+                frac = (y - top_y) / (base_y - top_y)
+                w = half * frac
+                if (cx - w) <= x <= (cx + w):
+                    r, g, b = blue
+            rows += bytes((r, g, b))
+
+    def chunk(tag, data):
+        c = struct.pack(">I", len(data)) + tag + data
+        return c + struct.pack(">I", zlib.crc32(tag + data) & 0xffffffff)
+
+    sig = b"\x89PNG\r\n\x1a\n"
+    ihdr = struct.pack(">IIBBBBB", size, size, 8, 2, 0, 0, 0)  # 8-bit RGB
+    idat = zlib.compress(bytes(rows), 9)
+    png = sig + chunk(b"IHDR", ihdr) + chunk(b"IDAT", idat) + chunk(b"IEND", b"")
+    path.write_bytes(png)
 
 
 if __name__ == "__main__":
