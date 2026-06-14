@@ -26,6 +26,7 @@ def render_portfolio(data) -> str:
         "genres": data.get("genre_strength", []),
         "fx": data.get("usdnok"),
         "regime": ((data.get("regime") or {}).get("composite") or {}).get("state"),
+        "benchmarks": data.get("benchmarks"),
     }
     for iid, a in data["assets"].items():
         if a.get("missing_data"):
@@ -62,6 +63,7 @@ Verdien følger kursutviklingen daglig. <strong>Ikke finansrådgivning.</strong>
     <button class="btn" id="applyCap">Oppdater</button>
     <button class="btn secondary" id="rebalance">Foreslå omfordeling</button>
     <button class="btn secondary" id="exportBtn">⬇ Eksporter backup</button>
+    <button class="btn secondary" id="syncBtn">⬆ Synk til GitHub</button>
     <button class="btn secondary" id="importBtn">⬆ Importer backup</button>
     <input id="importFile" type="file" accept="application/json" style="display:none">
     <button class="btn secondary" id="encBtn">🔒 Kryptering</button>
@@ -106,6 +108,15 @@ Verdien følger kursutviklingen daglig. <strong>Ikke finansrådgivning.</strong>
       <tbody id="posBody"></tbody></table>
   </section>
 </div>
+
+<section class="section">
+  <h2>📐 Realavkastning (fire spor)</h2>
+  <p class="sub">Avkastningen din målt mot det som faktisk teller for en norsk investor:
+  nominell NOK, <strong>real NOK</strong> (deflatert med norsk KPI), <strong>USD</strong>
+  (uten valutaeffekt) og <strong>gull-unser</strong> (din baseline). Per posisjon brukes
+  inngangsmåneden mot benchmark-seriene. Mangler KPI/FX-data, vises "ukjent".</p>
+  <div id="realBox"></div>
+</section>
 
 <section class="section">
   <h2>📜 Endringslogg</h2>
@@ -345,7 +356,7 @@ function render(){
   body.querySelectorAll(".posinput").forEach(inp=>inp.addEventListener("change",e=>{
     setPosition(e.target.dataset.id, Math.max(0,parseFloat(e.target.value)||0)); saveState(); render(); }));
 
-  drawPie(byId); renderHist(); saveState();
+  drawPie(byId); renderHist(); renderReal(); saveState();
 }
 
 function drawPie(byId){
@@ -365,6 +376,70 @@ function drawPie(byId){
   document.getElementById("pieLegend").innerHTML = slices.filter(s=>s.pct>0.01).map(s=>
     `<div style="font-size:12px"><span style="display:inline-block;width:10px;height:10px;background:${s.col};border-radius:2px"></span>
      ${s.label}: <strong>${s.pct.toFixed(1)}%</strong> <span class="muted">(${kr(s.val)})</span></div>`).join("");
+}
+
+// ---------- Realavkastning (fire spor) ----------
+function benchAt(series, ym){ // nærmeste verdi <= ym, ellers første
+  if(!series||!series.length) return null;
+  let v=null; for(const [d,val] of series){ if(d<=ym) v=val; else break; }
+  return v!=null? v : series[0][1];
+}
+function monthKey(s){ // "12.06.2026, 14:30" eller ISO -> "YYYY-MM"
+  if(!s) return null;
+  const iso=s.match(/(\d{4})-(\d{2})/); if(iso) return `${iso[1]}-${iso[2]}`;
+  const no=s.match(/(\d{2})\.(\d{2})\.(\d{4})/); if(no) return `${no[3]}-${no[2]}`;
+  return null;
+}
+function renderReal(){
+  const box=document.getElementById("realBox"); if(!box) return;
+  const b=DATA.benchmarks;
+  const ids=Object.keys(STATE.positions).filter(id=>(STATE.positions[id]?.cost||0)>0);
+  if(!ids.length){ box.innerHTML='<p class="muted">Ingen posisjoner.</p>'; return; }
+  if(!b||(!b.kpi_no&&!b.gold_usd)){ box.innerHTML='<p class="muted">Benchmark-data ukjent (KPI/gull mangler).</p>'; return; }
+  let rows='<table><thead><tr><th>Instrument</th><th style="text-align:right">Nominell NOK</th>'
+    +'<th style="text-align:right">Real NOK</th><th style="text-align:right">USD</th>'
+    +'<th style="text-align:right">Gull-unser</th></tr></thead><tbody>';
+  let aggCost=0, aggVal=0, aggUsdC=0, aggUsdV=0, aggOzC=0, aggOzV=0, aggRealC=0;
+  ids.forEach(id=>{
+    const p=STATE.positions[id]; const a=DATA.assets[id]||{}; const cur=priceOf(id);
+    const cost=p.cost||0; const v=valueOf(id);
+    const ym=monthKey(p.opened);
+    // Nominell NOK
+    const nom=(v/cost-1)*100;
+    // USD: strip valutaeffekt (bruk kun prisutvikling)
+    let usd=null, usdC=cost, usdV=cost;
+    if(cur&&p.entryPrice){ usd=(cur/p.entryPrice-1)*100; usdC=cost; usdV=cost*(cur/p.entryPrice); }
+    // Real NOK: deflater nominell med KPI-endring siden kjøp
+    let real=null, realC=cost;
+    const k0=benchAt(b.kpi_no,ym), k1=b.kpi_no?b.kpi_no[b.kpi_no.length-1][1]:null;
+    if(k0&&k1){ const infl=k1/k0; real=((v/cost)/infl-1)*100; realC=cost*infl; }
+    // Gull-unser: verdi i gull nå vs ved kjøp
+    let oz=null, ozC=cost, ozV=v;
+    const g0=benchAt(b.gold_usd,ym), g1=b.gold_usd?b.gold_usd[b.gold_usd.length-1][1]:null;
+    if(g0&&g1){ const ozAtEntry=cost/g0, ozNow=v/g1; oz=(ozNow/ozAtEntry-1)*100; }
+    aggCost+=cost; aggVal+=v;
+    if(usd!=null){ aggUsdC+=usdC; aggUsdV+=usdV; }
+    if(real!=null){ aggRealC+=realC; }
+    if(oz!=null){ aggOzC+=(cost/g0); aggOzV+=(v/g1); }
+    const cell=(x)=> x==null? '<td class="muted" style="text-align:right">ukjent</td>'
+      : `<td class="${x>=0?'up':'down'}" style="text-align:right">${x>=0?'+':''}${x.toFixed(1)}%</td>`;
+    rows+=`<tr><td><strong>${a.sym||id}</strong></td>${cell(nom)}${cell(real)}${cell(usd)}${cell(oz)}</tr>`;
+  });
+  const aNom=aggCost>0?(aggVal/aggCost-1)*100:null;
+  const aReal=aggRealC>0?(aggVal/aggRealC-1)*100:null;
+  const aUsd=aggUsdC>0?(aggUsdV/aggUsdC-1)*100:null;
+  const aOz=aggOzC>0?(aggOzV/aggOzC-1)*100:null;
+  const ac=(x)=> x==null?'<td class="muted" style="text-align:right">ukjent</td>'
+    :`<td class="${x>=0?'up':'down'}" style="text-align:right;font-weight:700">${x>=0?'+':''}${x.toFixed(1)}%</td>`;
+  rows+=`<tr style="border-top:2px solid var(--border)"><td><strong>Totalt</strong></td>${ac(aNom)}${ac(aReal)}${ac(aUsd)}${ac(aOz)}</tr>`;
+  rows+='</tbody></table>';
+  // NOWA-excess linje
+  if(b.nowa!=null && aNom!=null){
+    rows+=`<p class="sub" style="margin-top:8px">Mot risikofri (NOWA ${b.nowa.toFixed(2)}%): `
+      +`<strong class="${aNom-b.nowa>=0?'up':'down'}">${(aNom-b.nowa)>=0?'+':''}${(aNom-b.nowa).toFixed(1)} pp</strong> `
+      +`meravkastning mot å sitte i NOK-cash (forenklet, ikke tidsvektet).</p>`;
+  }
+  box.innerHTML=rows;
 }
 
 function renderHist(){
@@ -415,6 +490,17 @@ function bind(){
     a.click(); URL.revokeObjectURL(url);
   });
   document.getElementById("importBtn").addEventListener("click",()=>document.getElementById("importFile").click());
+  // Synk til GitHub: last ned portfolio.json for commit til docs/ (gjør porteføljen
+  // synlig for daglig bygg -> Discord kan nevne DINE posisjoner). Ingen PAT i klient.
+  document.getElementById("syncBtn").addEventListener("click",()=>{
+    const payload={updated:new Date().toISOString(), positions:STATE.positions};
+    const blob=new Blob([JSON.stringify(payload,null,2)],{type:"application/json"});
+    const url=URL.createObjectURL(blob); const a=document.createElement("a");
+    a.href=url; a.download="portfolio.json"; a.click(); URL.revokeObjectURL(url);
+    alert("portfolio.json lastet ned.\n\nLegg den i docs/ i repoet (commit) for at det "
+      +"daglige bygget skal se posisjonene dine og varsle på Discord når noe krever handling.\n\n"
+      +"NB: docs/ er offentlig — posisjonene blir synlige. Hopp over dette hvis du vil holde dem private.");
+  });
   document.getElementById("importFile").addEventListener("change",e=>{
     const f=e.target.files[0]; if(!f) return; const rd=new FileReader();
     rd.onload=()=>{ try{ const s=JSON.parse(rd.result);
