@@ -172,3 +172,47 @@ Discord forblir varselkanalen.
 > Verdiavhengige forbehold: backtest ≠ fremtid; dual momentum gir nedsidebeskyttelse, ikke
 > bull-meravkastning; makro-relasjoner (særlig global likviditet) er ustabile; value-tilt og
 > panikk-demper er evidensbaserte men ingen garanti. **Ikke finansrådgivning.**
+
+## v6: NSBC-korrigert score, roadmaps og hit-rate-validering
+
+Denne versjonen retter opp den viktigste feilen og bygger to nye analyse-motorer,
+basert på et grundig studium av Northstar & Badcharts' egne dokumenter.
+
+**Korrigert NSBC-score (viktigst).** Den gamle scoren brukte RSI + MACD og belønnet
+*oversold* (lav RSI = "god entry") — stikk i strid med NSBCs metode. NSBC bruker
+**ikke MACD**. Deres faktiske system er en evidens-klynge: **12 & 36 SMA Trend
+Navigator** (over begge = bull), **Ichimoku-sky 9/26/52** (over sky = bull),
+**distance-fra-36MA** (0 = nøytral, +10 % = stretched/FOMO-sone), **Stochastic RSI**,
+og **breakout fra konsolidering**. NSBCs definisjon av lavrisiko-entry er: *«ikke
+stretched fra langtids-MA OG nettopp brutt ut av en base/konsolidering»*. Scoren
+teller nå tente bevis, straffer stretched pris hardt (FOMO = høy risiko, ikke lav),
+og skiller **langtidsregime (M/Q)** fra **korttidstiming (W)** — du kan være LT bull
+og KT bear samtidig. Daily Report viser nå LT/KT-tilstand, evidens-badges, breakout-
+og stretched-merker per instrument.
+
+**🗺️ Roadmaps-fane (ny).** Auto-genererte roadmaps i NSBC-stil for hele universet:
+support/resistance fra klustrede swing-pivoter, trend-kanal med R² (trend-kvalitet),
+mål via measured move (AB=CD) og Fibonacci-extension, og scenarioer (bull/base/bear)
+hver med et **invaliderings-nivå** («line in the sand»). Kan vises både nominelt og
+**priced-in-gold**. Bygget fra ukentlig OHLC.
+
+**📊 Hit-rate-validering (ny).** Fra akkumulert score-historikk: «når NSBC-score ≥ 70,
+hva ble fremtidig 1/3/6-måneders avkastning — og hvor ofte var den positiv?» Vises
+alltid mot **base-rate** (alle perioder); edge = differansen. Streng metodikk: ingen
+look-ahead, n vises alltid, n<20 flagges «lav tillit». Inkluderer en kvart-Kelly-
+guide som først aktiveres ved stort nok utvalg. Score-historikk lagres daglig i
+`docs/history/score_history.json` og bygger seg opp over tid.
+
+**🎯 Triage-visning (ny, øverst på Trend).** Én fusjonert handlingsliste: nye
+lavrisiko-entries (breakout + ikke stretched), FOMO-exit-kandidater (stretched fra
+36-MA), og dine posisjoner som krever handling — hver med roadmap-mål. «Hva bør jeg
+vurdere i dag» på én skjerm.
+
+Nye moduler: `roadmap.py`, `validation.py`. Omskrevet: `scoring.py` (NSBC-metode),
+`data.py` (OHLC for Ichimoku/S/R), `indicators.py` (Ichimoku, StochRSI, Trend
+Navigator, support/resistance, breakout). Ny fane i navigasjonen: 🗺️ Roadmaps.
+
+> Forbehold: NSBCs eksakte numeriske terskler (StochRSI-bånd, distance-bånd) er
+> medlemsinnhold — strukturen er gjengitt tro mot dokumentene, men båndverdiene er
+> parametre å kalibrere mot din egen validering. Hit-rate-databasen er ung; de fleste
+> tall er foreløpige i starten. **Ikke finansrådgivning.**
