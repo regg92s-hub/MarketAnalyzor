@@ -12,7 +12,7 @@ Endringer fra market-daily-report (v8 -> analysor):
   - Lightweight Charts i stedet for matplotlib-PNG-er
 """
 
-VERSION = "2026-06-12-analysor-v5"
+VERSION = "2026-06-13-analysor-v6"
 
 # ──────────────────────────────────────────────────────────────────
 # INSTRUMENT-UNIVERS
