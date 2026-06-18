@@ -319,7 +319,8 @@ def trend_navigator(close: pd.Series, short=12, long=36) -> dict:
     s = close.rolling(short).mean()
     l = close.rolling(long).mean()
     if pd.isna(s.iloc[-1]) or pd.isna(l.iloc[-1]):
-        return {"state": None, "golden_cross": False, "death_cross": False}
+        return {"state": None, "above_both": False, "s_over_l": False,
+                "golden_cross": False, "death_cross": False}
     last = float(close.iloc[-1])
     above_both = bool(last > s.iloc[-1] and last > l.iloc[-1])
     s_over_l = bool(s.iloc[-1] > l.iloc[-1])
