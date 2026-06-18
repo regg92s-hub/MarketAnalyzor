@@ -23,7 +23,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import pandas as pd  # noqa: E402
-from analysor import config, data as datamod, scoring, analytics, regime as regimemod, render, portfolio, backtest as backtestmod, benchmarks as benchmarksmod, paper  # noqa: E402
+from analysor import config, data as datamod, scoring, analytics, regime as regimemod, render, portfolio, backtest as backtestmod, benchmarks as benchmarksmod, paper, roadmap as roadmapmod, validation as validationmod  # noqa: E402
 from analysor.config import VERSION, PALETTE  # noqa: E402
 from analysor.layout import LWC_CDN, LWC_LOCAL  # noqa: E402
 from analysor import indicators as ind  # noqa: E402
@@ -83,18 +83,29 @@ def main():
             assets[iid] = a
             continue
         frames = datamod.resample_frames(df)
-        score, parts = scoring.northstar_score(frames)
+        score, meta = scoring.nsbc_score(frames)
         a["northstar_score"] = score
         a["missing_data"] = False
         a["price_last"] = round(float(df["close_use"].iloc[-1]), 4)
         a["price_series"] = price_series_for_chart(df)
         a["risk"] = ind.risk_metrics(df["close_use"], config.RISK_LOOKBACK_DAYS, config.RISK_FREE_ANNUAL)
-        # kvartals-indikatorer for porteføljens overkjøpt-sjekk
-        q = parts.get("quarterly", {})
-        a["rsi_q"] = q.get("rsi14"); a["macd_q"] = q.get("macd_hist"); a["d36_q"] = (q.get("dist_to_36MA") or 0)/100.0 if q.get("dist_to_36MA") is not None else None
-        # weekly 50MA for sektor-trend
-        w = parts.get("weekly", {})
-        a["close_above_sma50_w"] = w.get("close_above_sma50")
+        # NSBC-tilstand: langtid (regime) × korttid (timing) + evidens
+        a["lt_state"] = meta.get("long_term")
+        a["st_state"] = meta.get("short_term")
+        a["evidence"] = meta.get("evidence", [])
+        a["ticks"] = meta.get("ticks", 0)
+        a["stretched"] = meta.get("stretched", False)
+        a["breakout"] = meta.get("breakout", False)
+        a["dist36_w"] = meta.get("dist36")
+        a["state_label"] = scoring.state_label(meta.get("long_term"), meta.get("short_term"))
+        wf = meta.get("frames", {}).get("weekly", {})
+        qf = meta.get("frames", {}).get("quarterly", {})
+        # porteføljens overkjøpt/stretched-sjekk bruker nå NSBC-evidens
+        a["rsi_q"] = qf.get("srsi_k")
+        a["overbought_w"] = bool(wf.get("srsi_overbought"))
+        a["stretched_w"] = bool(wf.get("stretched"))
+        # sektor-trend: over 12&36 MA (ukentlig) = NSBC bull-gate
+        a["close_above_sma50_w"] = wf.get("above_both_ma")
         # slår gull (ROC 1M/3M)
         if gld is not None and iid != "GLD":
             b = ind.beats_baseline(df["close_use"], gld["close_use"],
@@ -143,6 +154,11 @@ def main():
     rrg = analytics.build_rrg(raw, assets_meta)
     corr = analytics.build_correlation(raw)
     bt = backtestmod.run_backtest(raw, config.CYCLICAL_IDS, top_n=5)
+    # Auto-roadmaps (NSBC-stil) for hele universet
+    roadmaps = roadmapmod.build_all_roadmaps(raw, assets_meta, gld=raw.get("GLD"))
+    # Hit-rate-validering fra score-historikk
+    score_hist = load_score_history()
+    validation = validationmod.forward_returns(raw, raw.get("GLD"), score_hist)
     reg = regimemod.build_regime(os.environ.get("FRED_API_KEY", ""))
     # Panikk-tilstand (Daniel & Moskowitz) inn i regimet
     pstate = analytics.panic_state(raw)
@@ -196,6 +212,8 @@ def main():
         "rrg": rrg,
         "correlation": corr,
         "backtest": bt,
+        "roadmaps": roadmaps,
+        "validation": validation,
         "regime": reg,
         "benchmarks": bench,
         "regime_history": rhist,
@@ -220,6 +238,9 @@ def main():
     log(f"signals.json skrevet ({len(changes)} endringer siden forrige bygg)")
     notify_discord(changes, user_val)
 
+    # 5c. Append dagens NSBC-scorer til historikk (for hit-rate-validering)
+    append_score_history(assets)
+
     # AI-morgenbrief (valgfri, krever ANTHROPIC_API_KEY) — strengt grunnet
     # i beregnede signaler, aldri egne tall.
     model["ai_brief"] = build_ai_brief(model)
@@ -232,6 +253,7 @@ def main():
     # 7. HTML-sider
     (DOCS / "index.html").write_text(render.render_trend(model), encoding="utf-8")
     (DOCS / "report.html").write_text(render.render_report(model), encoding="utf-8")
+    (DOCS / "roadmap.html").write_text(render.render_roadmap(model), encoding="utf-8")
     (DOCS / "portfolio.html").write_text(portfolio.render_portfolio(model), encoding="utf-8")
     (DOCS / "backtest.html").write_text(render.render_backtest(model), encoding="utf-8")
     log("HTML-sider skrevet")
@@ -281,6 +303,31 @@ def signals_snapshot(model: dict) -> dict:
     br = model.get("breadth") or {}
     snap["breadth50"] = br.get("pct_over_50ma")
     return snap
+
+
+def load_score_history() -> dict:
+    """Score-historikk (snapshots) for hit-rate-validering."""
+    hist = load_prev_json("history/score_history.json") or {}
+    return hist if isinstance(hist, dict) else {}
+
+
+def append_score_history(assets: dict):
+    """Append dagens scorer til docs/history/score_history.json (en per dag)."""
+    hist = load_score_history()
+    today = NOW.strftime("%Y-%m-%d")
+    row = {iid: a["northstar_score"] for iid, a in assets.items()
+           if not a.get("missing_data") and a.get("northstar_score") is not None}
+    row["_real"] = True
+    hist[today] = row
+    keys = sorted(hist.keys())
+    if len(keys) > 520:
+        for k in keys[:-520]:
+            hist.pop(k, None)
+    hdir = DOCS / "history"
+    hdir.mkdir(parents=True, exist_ok=True)
+    with open(hdir / "score_history.json", "w", encoding="utf-8") as f:
+        json.dump(hist, f, separators=(",", ":"))
+    log(f"score_history.json: {len(hist)} datoer")
 
 
 def load_prev_json(name: str) -> dict | None:
@@ -465,7 +512,7 @@ def write_pwa_assets():
 
     # Service worker: network-first for data (.json), cache-first for resten.
     sw = """const CACHE = 'analysor-v5';
-const CORE = ['./','./index.html','./report.html','./portfolio.html','./backtest.html',
+const CORE = ['./','./index.html','./report.html','./roadmap.html','./portfolio.html','./backtest.html',
   './lightweight-charts.standalone.production.js','./manifest.webmanifest'];
 self.addEventListener('install', e => {
   e.waitUntil(caches.open(CACHE).then(c => c.addAll(CORE)).then(()=>self.skipWaiting()));
