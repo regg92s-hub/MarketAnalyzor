@@ -41,12 +41,12 @@ def frame_evidence(df: pd.DataFrame) -> dict:
     brk = ind.breakout_state(high, low, c)
 
     return {
-        "trend": tn["state"],            # bull / neutral / bear
-        "above_both_ma": tn["above_both"],
-        "golden_cross": tn["golden_cross"],
-        "death_cross": tn["death_cross"],
-        "cloud": ich["position"],        # above / inside / below
-        "future_bull": ich["future_bull"],
+        "trend": tn.get("state"),            # bull / neutral / bear
+        "above_both_ma": tn.get("above_both", False),
+        "golden_cross": tn.get("golden_cross", False),
+        "death_cross": tn.get("death_cross", False),
+        "cloud": ich.get("position"),        # above / inside / below
+        "future_bull": ich.get("future_bull"),
         "dist36": dist["dist"],
         "dist_crossed_up": dist["crossed_up"],
         "stretched": dist["stretched"],
