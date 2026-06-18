@@ -66,6 +66,9 @@ def render_trend(data) -> str:
             out.append(f'<div class="{cls}" style="padding:4px 0;font-weight:600;font-size:14px">{html.escape(c)}</div>')
         out.append('</section>')
 
+    # 🎯 Triage: hva bør jeg vurdere i dag (én handlingsliste)
+    out.append(_triage_view(data))
+
     # Regime-stripe
     reg = data.get("regime", {})
     out.append('<section class="section"><h2>Makro-regime</h2>'
@@ -187,8 +190,125 @@ def render_trend(data) -> str:
                        f'<td class="{lcls}">{html.escape(leader)}</td></tr>')
         out.append('</tbody></table></section>')
 
+    # 📊 Hit-rate-validering (treffsikkerhet over tid)
+    out.append(_hitrate_section(data.get("validation", {})))
+
     out.append(layout.foot())
     return "".join(out)
+
+
+def _triage_view(data) -> str:
+    """🎯 Hva bør jeg vurdere i dag — én fusjonert handlingsliste.
+    Nye lavrisiko-entries, stretched/FOMO-exit-kandidater, og dine posisjoner."""
+    assets = data.get("assets", {})
+    uv = data.get("user_portfolio")
+    roadmaps = data.get("roadmaps", {})
+
+    entries, exits, holds_action = [], [], []
+    for iid, a in assets.items():
+        if a.get("missing_data"):
+            continue
+        sc = a.get("northstar_score", 0)
+        sym = a.get("symbol_label", iid)
+        # Nye lavrisiko-entries: høy score + breakout + ikke stretched + LT konstruktiv
+        if sc >= 70 and a.get("breakout") and not a.get("stretched"):
+            entries.append((sc, sym, iid, a.get("state_label", "")))
+        # Exit-kandidater: stretched i FOMO-sonen
+        if a.get("stretched") and a.get("st_state") != "bear":
+            exits.append((a.get("dist36_w") or 0, sym, iid))
+
+    # Dine posisjoner som krever handling
+    if uv and uv.get("rows"):
+        for r in uv["rows"]:
+            if r["verdict"] in ("SKALER AV", "VURDER SKALER AV"):
+                holds_action.append(r)
+
+    if not (entries or exits or holds_action):
+        return ('<section class="section"><h2>🎯 Hva bør jeg vurdere i dag</h2>'
+                '<p class="sub">Ingen nye lavrisiko-entries, FOMO-exit-kandidater eller '
+                'posisjons-varsler akkurat nå. Tålmodighet er en posisjon.</p></section>')
+
+    parts = ['<section class="section" style="border:2px solid var(--good)">'
+             '<h2>🎯 Hva bør jeg vurdere i dag</h2>'
+             '<p class="sub">Fusjonert handlingsliste: nye lavrisiko-entries (NSBC: breakout + '
+             'ikke stretched), FOMO-exit-kandidater, og dine posisjoner. '
+             'Hver rad lenker til roadmap-nivåene. <strong>Ikke finansrådgivning.</strong></p>']
+
+    if entries:
+        entries.sort(reverse=True)
+        parts.append(f'<h3 style="color:{PALETTE["up"]};margin-top:8px">▲ Nye lavrisiko-entries</h3>')
+        for sc, sym, iid, state in entries[:8]:
+            rm = roadmaps.get(iid, {}).get("nominal", {})
+            tgt = ""
+            if rm and rm.get("scenarios", {}).get("base", {}).get("target"):
+                b = rm["scenarios"]["base"]
+                pct = b.get("pct")
+                pct_s = f' ({pct:+.0f}%)' if isinstance(pct, (int, float)) else ""
+                tgt = f' <span class="muted">base-mål {b["target"]:g}{pct_s}</span>'
+            parts.append(f'<div style="padding:3px 0"><strong>{html.escape(sym)}</strong> '
+                         f'<span class="pill" style="background:{PALETTE["up"]}22;color:{PALETTE["up"]}">score {sc}</span> '
+                         f'<span class="muted" style="font-size:12px">{html.escape(state)}</span>{tgt}</div>')
+
+    if exits:
+        exits.sort(reverse=True)
+        parts.append(f'<h3 style="color:{PALETTE["warn"]};margin-top:10px">⚠ FOMO-sone (vurder å skalere av)</h3>')
+        for dist, sym, iid in exits[:8]:
+            parts.append(f'<div style="padding:3px 0"><strong>{html.escape(sym)}</strong> '
+                         f'<span class="warn">stretched {dist:+.1f}% fra 36-MA</span> '
+                         f'<span class="muted" style="font-size:12px">— høy risiko å gå inn, vurder profittsikring</span></div>')
+
+    if holds_action:
+        parts.append(f'<h3 style="color:{PALETTE["down"]};margin-top:10px">💼 Dine posisjoner</h3>')
+        for r in holds_action:
+            col = PALETTE["down"] if r["verdict"] == "SKALER AV" else PALETTE["warn"]
+            parts.append(f'<div style="padding:3px 0;color:{col};font-weight:600">'
+                         f'{html.escape(r["sym"])}: {html.escape(r["verdict"])} '
+                         f'<span class="muted" style="font-weight:400">({html.escape(r["why"])}, '
+                         f'{r["pnl_pct"]:+.1f}%)</span></div>')
+
+    parts.append('</section>')
+    return "".join(parts)
+
+
+def _hitrate_section(val) -> str:
+    """📊 Hit-rate-validering: når NSBC-score ≥70, hva ble fremtidig avkastning?"""
+    if not val or not val.get("available"):
+        reason = (val or {}).get("reason", "bygger opp historikk")
+        snaps = (val or {}).get("snapshots", 0)
+        return ('<section class="section"><h2>📊 Hit-rate-validering</h2>'
+                f'<p class="sub">Treffsikkerhet måles fra akkumulert score-historikk: '
+                f'«når score ≥ 70, hva ble fremtidig avkastning vs base-rate?» '
+                f'Status: {html.escape(reason)} ({snaps} snapshots). '
+                f'Statistikken blir meningsfull etter noen måneders daglige bygg.</p></section>')
+
+    parts = ['<section class="section"><h2>📊 Hit-rate-validering</h2>',
+             f'<p class="sub">{html.escape(val.get("signal",""))} — fremtidig avkastning vs '
+             f'<strong>base-rate</strong> (alle perioder). Edge = signal minus base. '
+             f'{html.escape(val.get("note",""))} ({val.get("snapshots")} snapshots.)</p>',
+             '<table><thead><tr><th>Horisont</th><th style="text-align:right">Signal snitt</th>'
+             '<th style="text-align:right">Base-rate</th><th style="text-align:right">Edge</th>'
+             '<th style="text-align:right">Hit-rate</th><th style="text-align:right">n</th>'
+             '<th>Tillit</th></tr></thead><tbody>']
+    for h, r in val.get("horizons", {}).items():
+        sig = r.get("signal"); base = r.get("base")
+        if not sig or not base:
+            continue
+        edge = r.get("edge_mean")
+        ecol = PALETTE["up"] if (edge or 0) > 0 else PALETTE["down"]
+        conf = ('<span class="down">lav (n<20)</span>' if r.get("low_confidence")
+                else '<span class="up">ok</span>')
+        parts.append(f'<tr><td><strong>{h}</strong></td>'
+                     f'<td style="text-align:right">{sig["mean"]:+.1f}%</td>'
+                     f'<td style="text-align:right" class="muted">{base["mean"]:+.1f}%</td>'
+                     f'<td style="text-align:right;color:{ecol};font-weight:700">{edge:+.1f} pp</td>'
+                     f'<td style="text-align:right">{sig["hit_rate"]:.0f}%</td>'
+                     f'<td style="text-align:right">{sig["n"]}</td>'
+                     f'<td>{conf}</td></tr>')
+    parts.append('</tbody></table>'
+                 '<p class="sub" style="margin-top:8px">⚠ Databasen er ung — behandle lave-tillit-tall '
+                 'som foreløpige. En positiv edge over base-rate, med n≥20, er det som teller — ikke '
+                 'råtallet alene. Sizing bør ikke styres av et lite utvalg.</p></section>')
+    return "".join(parts)
 
 
 def _decision_dashboard(data) -> str:
@@ -361,8 +481,11 @@ def _ranking_table(rk, title, den):
 def render_report(data) -> str:
     P = layout.head("Market Daily Report", 1)
     out = [P, '<h1 id="top">📊 Market Daily Report</h1>',
-           '<p class="sub">Northstar-score 0–100 (høyere = lavere risiko / bedre entry), '
-           'snitt av RSI, MACD og MA-avstand over ukentlig/månedlig/kvartal. '
+           '<p class="sub">NSBC-score 0–100 (høyere = ekte lavrisiko-entry slik Northstar '
+           'definerer det: <strong>ikke stretched fra 36-MA + nettopp brutt ut av base + over trend</strong>). '
+           'Bygget på evidens-klynge: 12&amp;36 SMA, Ichimoku-sky (9/26/52), distance-fra-36MA, StochRSI og breakout — '
+           'over ukentlig/månedlig/kvartal. Stretched pris i FOMO-sonen gir LAV score (høy risiko), ikke høy. '
+           'LT = langtidsregime (M/Q), KT = korttidstiming (W) — du kan være bull på én og bear på en annen.</p>'
            'Sektorscore = snitt av medlemmenes score; trend = andel over 50MA (ukentlig).</p>']
 
     # Sektorscore — kort lenker til sin seksjon lenger ned
@@ -422,18 +545,36 @@ def render_report(data) -> str:
                             f'maxDD {rm["max_dd"]:.0f}% · Sharpe {rm["sharpe"]:.2f}</span>'
                             if rm.get("sharpe") is not None else
                             f'<span class="muted">vol {rm["vol"]:.0f}%</span>')
+            # NSBC-tilstand + evidens-badges + stretched-varsel
+            lt = a.get("lt_state"); st = a.get("st_state")
+            def _sb(s):
+                return ('<span class="up">bull</span>' if s == "bull"
+                        else '<span class="down">bear</span>' if s == "bear"
+                        else '<span class="muted">nøytral</span>')
+            state_html = f'<span class="tag">LT {_sb(lt)} · KT {_sb(st)}</span>'
+            ev = a.get("evidence", [])
+            ticks = a.get("ticks", 0)
+            ev_html = (f'<span class="tag" style="color:{PALETTE["good"]}">✓ {ticks} bevis</span>'
+                       if ticks else "")
+            stretch_html = ('<span class="pill" style="background:#D55E0022;color:#D55E00">⚠ stretched (FOMO)</span>'
+                            if a.get("stretched") else "")
+            brk_html = ('<span class="pill" style="background:#0072B222;color:#0072B2">▲ breakout</span>'
+                        if a.get("breakout") else "")
+            ev_detail = (f'<div class="muted" style="font-size:11px;margin:2px 0">Evidens: {", ".join(ev)}</div>'
+                         if ev else "")
             chart_id = f"ch_{iid}"
             chart_init.append({"el": chart_id, "series": a.get("price_series", [])})
             out.append(
                 f'<div class="section" style="margin:10px 0">'
-                f'<div style="display:flex;flex-wrap:wrap;gap:10px;align-items:baseline">'
+                f'<div style="display:flex;flex-wrap:wrap;gap:8px;align-items:baseline">'
                 f'<h3>{html.escape(a.get("display_name", iid))}</h3>'
                 f'<span class="tag">{html.escape(sym)}</span>'
-                f'<span class="tag" style="color:{PALETTE["accent"]}">{html.escape(a.get("subclass",""))}</span>'
                 f'<span class="pill" style="background:{col}22;color:{col}">Score {sc} · {html.escape(lab)}</span>'
+                f'{state_html}{ev_html}{brk_html}{stretch_html}'
                 f'{gb_html}'
                 f'<a class="tv" href="{_tv(sym,"GLD")}" target="_blank" rel="noopener">📊 {html.escape(sym)}/GLD</a>'
                 f'</div>'
+                f'{ev_detail}'
                 f'<div style="margin:4px 0">{risk_str}</div>'
                 f'<div class="lwc" id="{chart_id}"></div>'
                 f'</div>')
@@ -580,7 +721,7 @@ def _corr_section(corr) -> str:
 
 # ── Backtest-side ─────────────────────────────────────────────────
 def render_backtest(data) -> str:
-    P = layout.head("Backtest", 3)
+    P = layout.head("Backtest", 4)
     bt = data.get("backtest", {})
     out = [P, '<h1>🧪 Backtest — walk-forward</h1>',
            '<p class="sub">Ærlig out-of-sample-test av en enkel, økonomisk motivert rotasjonsregel: '
@@ -661,3 +802,110 @@ function initBt(){
 }
 if(window.LightweightCharts) initBt(); else window.addEventListener('load', initBt);
 """
+
+
+# ── Roadmap-side (NSBC-stil auto-roadmaps) ────────────────────────
+def render_roadmap(data) -> str:
+    P = layout.head("Roadmaps", 2)
+    roadmaps = data.get("roadmaps", {})
+    assets = data.get("assets", {})
+    out = [P, '<h1>🗺️ Roadmaps</h1>',
+           '<p class="sub">Auto-genererte roadmaps i NSBC-stil: support/resistance, '
+           'trend-kanal, mål (measured move + Fibonacci) og scenarioer (bull/base/bear) '
+           'med invaliderings-nivå. Bygget fra ukentlig OHLC. '
+           '<strong>Ikke finansrådgivning.</strong></p>']
+
+    if not roadmaps:
+        out.append('<section class="section"><p class="muted">Ingen roadmaps tilgjengelig ennå.</p></section>')
+        out.append(layout.foot())
+        return "".join(out)
+
+    # Sorter etter score (sterkest oppsett først)
+    order = sorted(roadmaps.keys(),
+                   key=lambda i: -(assets.get(i, {}).get("northstar_score", 0)))
+
+    # Toggle nominal/gull
+    out.append('<div style="margin:8px 0"><button class="btn secondary" id="tgGold" '
+               'onclick="toggleGold()">Vis priced-in-gold</button></div>')
+
+    for iid in order:
+        entry = roadmaps[iid]
+        a = assets.get(iid, {})
+        sym = a.get("symbol_label", iid)
+        score = a.get("northstar_score", "–")
+        lab, col = score_label(score) if isinstance(score, int) else ("", PALETTE["muted"])
+        out.append(f'<section class="section roadmap-card" data-id="{iid}">')
+        out.append(f'<div style="display:flex;flex-wrap:wrap;gap:10px;align-items:baseline">'
+                   f'<h2 style="margin:0">{html.escape(a.get("display_name", iid))}</h2>'
+                   f'<span class="tag">{html.escape(sym)}</span>'
+                   f'<span class="pill" style="background:{col}22;color:{col}">Score {score} · {html.escape(lab)}</span>'
+                   f'<span class="muted" style="font-size:12px">{html.escape(a.get("state_label",""))}</span>'
+                   f'</div>')
+        # nominal + gull-versjoner
+        out.append(f'<div class="rm-nominal">{_roadmap_block(entry.get("nominal"), sym)}</div>')
+        if entry.get("gold"):
+            out.append(f'<div class="rm-gold" style="display:none">'
+                       f'<p class="sub">Priced in gold ({html.escape(sym)}/GLD):</p>'
+                       f'{_roadmap_block(entry.get("gold"), sym + "/GLD")}</div>')
+        out.append('</section>')
+
+    out.append('<script>function toggleGold(){'
+               'var g=document.querySelectorAll(".rm-gold"),n=document.querySelectorAll(".rm-nominal");'
+               'var show=g.length&&g[0].style.display==="none";'
+               'g.forEach(e=>e.style.display=show?"block":"none");'
+               'n.forEach(e=>e.style.display=show?"none":"block");'
+               'document.getElementById("tgGold").textContent=show?"Vis nominell":"Vis priced-in-gold";}'
+               '</script>')
+    out.append(layout.foot())
+    return "".join(out)
+
+
+def _roadmap_block(rm, sym) -> str:
+    if not rm:
+        return '<p class="muted">For lite data.</p>'
+    last = rm["last"]
+    sc = rm["scenarios"]
+
+    def level_row(name, sc_data, color):
+        t = sc_data.get("target")
+        p = sc_data.get("pct")
+        if t is None:
+            return ""
+        psign = f"{p:+.1f}%" if p is not None else ""
+        trig = sc_data.get("trigger")
+        trig_s = f' <span class="muted">trigger {trig:g}</span>' if trig else ""
+        return (f'<tr><td style="color:{color};font-weight:700">{name}</td>'
+                f'<td style="text-align:right">{t:g}</td>'
+                f'<td style="text-align:right;color:{color}">{psign}</td>'
+                f'<td class="muted" style="font-size:11px">{html.escape(sc_data.get("note",""))}{trig_s}</td></tr>')
+
+    rows = (level_row("🟢 BULL", sc["bull"], PALETTE["up"]) +
+            level_row("⚪ BASE", sc["base"], PALETTE["accent"]) +
+            level_row("🔴 BEAR", sc["bear"], PALETTE["down"]))
+
+    # støtte/motstand-nivåer
+    res = " · ".join(f'{r["price"]:g}' for r in rm.get("resistance", [])[:3]) or "–"
+    sup = " · ".join(f'{s["price"]:g}' for s in rm.get("support", [])[:3]) or "–"
+    chan = rm.get("channel") or {}
+    r2 = chan.get("r2")
+    trend_q = ("sterk" if (r2 or 0) > 0.7 else "moderat" if (r2 or 0) > 0.4 else "svak")
+    inval = rm.get("invalidation")
+    stretched = rm.get("stretched")
+
+    extra = ""
+    if stretched:
+        extra = (f'<div class="warn" style="font-weight:600;margin:6px 0">'
+                 f'⚠ Stretched fra 36-MA ({rm.get("dist36")}%) — IKKE et lavrisiko-entry (FOMO-sone)</div>')
+
+    inval_s = f"{inval:g}" if inval else "–"
+    return (
+        f'<table style="margin-top:8px"><thead><tr><th>Scenario</th><th style="text-align:right">Mål</th>'
+        f'<th style="text-align:right">Avstand</th><th>Kommentar</th></tr></thead><tbody>{rows}</tbody></table>'
+        f'{extra}'
+        f'<div class="kpi" style="margin-top:8px">'
+        f'<div class="k"><div class="lbl">Pris nå</div><div class="val">{last:g}</div></div>'
+        f'<div class="k"><div class="lbl">Motstand over</div><div class="val" style="font-size:14px">{res}</div></div>'
+        f'<div class="k"><div class="lbl">Støtte under</div><div class="val" style="font-size:14px">{sup}</div></div>'
+        f'<div class="k"><div class="lbl">Invalidering</div><div class="val" style="font-size:15px;color:{PALETTE["down"]}">{inval_s}</div></div>'
+        f'<div class="k"><div class="lbl">Trend-kvalitet (R²)</div><div class="val" style="font-size:15px">{r2 if r2 is not None else "–"} <span class="muted" style="font-size:11px">{trend_q}</span></div></div>'
+        f'</div>')
