@@ -98,8 +98,15 @@ def main():
         a["breakout"] = meta.get("breakout", False)
         a["dist36_w"] = meta.get("dist36")
         a["state_label"] = scoring.state_label(meta.get("long_term"), meta.get("short_term"))
+        a["stage"] = meta.get("stage")
+        a["stage_label"] = meta.get("stage_label")
+        a["stage_reason"] = meta.get("stage_reason")
         wf = meta.get("frames", {}).get("weekly", {})
         qf = meta.get("frames", {}).get("quarterly", {})
+        mf = meta.get("frames", {}).get("monthly", {})
+        # Avstand fra 12 & 36 MA på ukentlig OG månedlig (NSBC distance-gauge)
+        a["dist_w"] = {"d12": wf.get("dist12"), "d36": wf.get("dist36")}
+        a["dist_m"] = {"d12": mf.get("dist12"), "d36": mf.get("dist36")}
         # porteføljens overkjøpt/stretched-sjekk bruker nå NSBC-evidens
         a["rsi_q"] = qf.get("srsi_k")
         a["overbought_w"] = bool(wf.get("srsi_overbought"))
@@ -128,18 +135,43 @@ def main():
         avg = round(sum(vals) / len(vals), 1)
         over = sum(1 for i in iids if assets[i].get("close_above_sma50_w") is True)
         tot = sum(1 for i in iids if assets[i].get("close_above_sma50_w") is not None)
+        pct_over = round(over / tot * 100) if tot else None
+        # Aggreger stage: hvor mange medlemmer i nedtrend (Stage 4) vs opptrend (Stage 2)
+        stages = [assets[i].get("stage") for i in iids if assets[i].get("stage")]
+        n_down = sum(1 for s in stages if s == 4)
+        n_up = sum(1 for s in stages if s == 2)
+        n_stretch = sum(1 for i in iids if assets[i].get("stretched"))
         if tot and over / tot >= 0.5:
-            ttxt, tcol = "Opptrend", PALETTE["up"]
+            ttxt, tcol = f"Opptrend — {pct_over}% over 30-ukers MA (ukentlig)", PALETTE["up"]
         elif tot:
-            ttxt, tcol = "Dipp i trend", PALETTE["warn"]
+            ttxt, tcol = f"Svak — bare {pct_over}% over 30-ukers MA (ukentlig)", PALETTE["warn"]
         else:
             ttxt, tcol = "Ingen data", PALETTE["neutral"]
-        lab, scol = scoring.score_label(int(round(avg)))
+        # KORRIGERT etikett: skiller nedtrend fra strukket på sektornivå
+        if stages and n_down >= len(stages) * 0.5:
+            lab, scol = "Nedtrend (Stage 4)", PALETTE["down"]
+        elif n_stretch >= max(1, len(iids) * 0.5):
+            lab, scol = "Strukket (FOMO-sone)", PALETTE["warn"]
+        else:
+            lab, scol = scoring.score_label(int(round(avg)))
+        # Plain-language forklaring i boksen
+        if lab.startswith("Nedtrend"):
+            explain = (f"{n_down} av {len(iids)} instrumenter er i nedtrend (under fallende 12&36-MA). "
+                       "Lav score = ingen bullish bevis, IKKE strukket. Unngå nye kjøp; vent på base.")
+        elif lab.startswith("Strukket"):
+            explain = ("Sektoren er i opptrend, men flere medlemmer er strukket fra 36-MA (FOMO-sone). "
+                       "Eiere kan holde; nye kjøp har høy risiko. Vent på tilbaketrekk/konsolidering.")
+        elif avg >= 70:
+            explain = "Flere medlemmer i ekte lavrisiko-entry (over trend, ikke strukket, bryter ut)."
+        else:
+            explain = (f"Snittscore {avg}/100 over ukentlig/månedlig/kvartal. "
+                       f"{n_up} i opptrend, {n_down} i nedtrend. Se enkeltinstrumenter for detaljer.")
         sector_summary[sec] = {
             "display": "Råvarer" if sec == "Rawarer" else sec,
             "avg_score": avg, "label": lab, "score_col": scol,
             "trend_txt": ttxt, "trend_col": tcol,
-            "over_ma50": over, "total_ma50": tot, "n": len(iids),
+            "over_ma50": over, "total_ma50": tot, "pct_over": pct_over, "n": len(iids),
+            "n_down": n_down, "n_up": n_up, "explain": explain,
         }
 
     # 4. Analyselag
