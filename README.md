@@ -216,3 +216,39 @@ Navigator, support/resistance, breakout). Ny fane i navigasjonen: 🗺️ Roadma
 > medlemsinnhold — strukturen er gjengitt tro mot dokumentene, men båndverdiene er
 > parametre å kalibrere mot din egen validering. Hit-rate-databasen er ung; de fleste
 > tall er foreløpige i starten. **Ikke finansrådgivning.**
+
+## v7: Stage-analyse (fikser crypto-feilen), forklaringer i hver boks, SMA-avstand
+
+Denne versjonen retter feilen du fant og bygger forklaringssystemet.
+
+**Stage-analyse (Weinstein) — fikser "stretched"-feilen.** Den viktigste rettelsen:
+en lav score kunne før få etiketten "Høy risiko / stretched" selv om instrumentet var
+i NEDTREND (ikke strukket i det hele tatt). Nå klassifiseres hvert instrument i en
+Weinstein-fase: **Stage 1 basing, Stage 2 opptrend, Stage 3 distribusjon, Stage 4
+nedtrend**. Strukket/FOMO er nå korrekt en under-tilstand av Stage 2 (opptrend, men
+for langt over 36-MA) — aldri det samme som Stage 4 (nedtrend, under fallende MA).
+Crypto i nedtrend viser nå "Nedtrend (Stage 4)" med forklaring "ingen bullish bevis",
+ikke "stretched". Gjelder både enkeltinstrumenter og sektorscore.
+
+**Forklaring i hver boks.** Et nytt sentralt forklaringssystem (`glossary.py`) gir en
+kort klartekst under hver boks: hva betyr "Risk-on 80/100"? → "Makrobildet favoriserer
+risiko: flertallet av motorene er positive. Historisk medvind for aksjer/krypto." Hver
+makro-boks, score og nøkkeltall har nå en "hva betyr dette → hva bør jeg gjøre"-linje.
+
+**SMA-avstand med tidsramme.** Under hvert instrument i Daily Report vises nå avstand
+fra **både 12 og 36 MA, på både ukentlig og månedlig** — fargekodet (grønn over snitt,
+oransje strukket >+10%, rød under). Dette er NSBCs distance-gauge.
+
+**Alltid merket tidsramme.** Alle "over/under MA"-bobler oppgir nå tidsrammen eksplisitt
+("71% over 30-ukers MA (ukentlig)") — rapportkrav om at ingen boble skal stå uten
+tidsramme.
+
+**"Slår gull" verifisert + Mansfield RS.** Bekreftet at beats-gull bruker korrekt
+ratio-metode (ROC av pris/gull-forholdet, ikke differanse av to ROC-er). Lagt til
+**Mansfield relativ styrke** (ratio normalisert mot eget 52-ukers snitt) — NSBC-native
+nullinje-test. Vises ved siden av slår-gull.
+
+> Gjenstår fra rapporten (planlagt): indikatorer tegnet PÅ chartene (Ichimoku-sky, MA-er,
+> sub-paneler), roadmaps som annoterte charts, anbefalings-backtest ("hvis alle signaler
+> var fulgt"), flere instrumenter (sektorer, land, renter, faktorer, trend-sleeve), og
+> global bredde-måler. **Ikke finansrådgivning.**
