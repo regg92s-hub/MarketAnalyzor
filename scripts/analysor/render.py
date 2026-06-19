@@ -8,6 +8,7 @@ import html
 import json
 from .config import PALETTE, tv_symbol
 from . import layout
+from . import glossary
 from .scoring import score_label
 
 
@@ -85,7 +86,12 @@ def render_trend(data) -> str:
         out.append('<div class="sector-grid">')
         comp = reg.get("composite")
         if comp:
-            out.append(_regime_card("Samlet regime", comp.get("label"), comp.get("col"), comp.get("state", "")))
+            out.append(_regime_card("Samlet regime", comp.get("label"), comp.get("col"),
+                                    comp.get("state", ""), "regime_composite"))
+        ex_keys = {"yield_curve": "yield_curve", "net_liquidity": "net_liquidity",
+                   "global_liquidity": "global_liquidity", "real_rate": "real_rate",
+                   "breakeven": "breakeven", "nfci": "nfci", "credit_spread": "credit_spread",
+                   "panic": "panic", "gpr": "gpr"}
         for key, title in [("yield_curve", "Yield-kurve 2s10s"), ("term_spread_10y3m", "10y-3m spread"),
                            ("net_liquidity", "Net liquidity (WALCL−TGA−RRP)"),
                            ("global_liquidity", "G3-likviditet (Fed+ECB+BoJ)"),
@@ -95,8 +101,13 @@ def render_trend(data) -> str:
                            ("gpr", "Geopolitisk risiko (GPR)")]:
             r = reg.get(key)
             if r:
-                out.append(_regime_card(title, r.get("label"), r.get("col"), r.get("note", "")))
+                out.append(_regime_card(title, r.get("label"), r.get("col"), r.get("note", ""),
+                                        ex_keys.get(key)))
         out.append('</div>')
+        # Samlet forklaring av regimet i klartekst
+        if comp:
+            out.append(f'<div class="explain" style="margin-top:8px"><span class="ex-what">'
+                       f'{html.escape(glossary.regime_one_liner(comp.get("score")))}</span></div>')
     out.append('</section>')
 
     # Markedsbredde (flyttet opp – overordnet markedstilstand først)
@@ -433,11 +444,12 @@ def _regime_timeline(rhist) -> str:
             f'<span>{d1}</span></div>')
 
 
-def _regime_card(title, label, col, note):
+def _regime_card(title, label, col, note, explain_key=None):
+    ex = glossary.box(explain_key) if explain_key else ""
     return (f'<div class="sc" style="border-color:{col}55">'
             f'<div class="sc-name">{html.escape(title)}</div>'
             f'<div style="font-size:15px;font-weight:700;color:{col}">{html.escape(label or "–")}</div>'
-            f'<div class="sc-label muted">{html.escape(note or "")}</div></div>')
+            f'<div class="sc-label muted">{html.escape(note or "")}</div>{ex}</div>')
 
 
 def _ranking_table(rk, title, den):
@@ -478,6 +490,30 @@ def _ranking_table(rk, title, den):
 
 
 # ── Market Daily Report ───────────────────────────────────────────
+def _dist_display(a) -> str:
+    """Avstand fra 12 & 36 SMA, ukentlig OG månedlig — alltid med tidsramme.
+    Farge: grønn nær/over, oransje strukket (>+10%), rød under."""
+    dw = a.get("dist_w", {}) or {}
+    dm = a.get("dist_m", {}) or {}
+
+    def cell(val):
+        if val is None:
+            return '<span class="muted">n/a</span>'
+        if val >= 10:
+            c = PALETTE["warn"]      # strukket / FOMO
+        elif val >= 0:
+            c = PALETTE["up"]        # sunn, over snitt
+        else:
+            c = PALETTE["down"]      # under snitt
+        return f'<span style="color:{c};font-weight:600">{val:+.1f}%</span>'
+
+    return ('<div style="font-size:11.5px;margin:3px 0;color:var(--muted)">'
+            'Avstand fra MA — '
+            f'<strong>ukentlig:</strong> 12MA {cell(dw.get("d12"))} · 36MA {cell(dw.get("d36"))} &nbsp; '
+            f'<strong>månedlig:</strong> 12MA {cell(dm.get("d12"))} · 36MA {cell(dm.get("d36"))} '
+            '<span class="muted">(0% = ved snittet, +10% = strukket/FOMO-sone)</span></div>')
+
+
 def render_report(data) -> str:
     P = layout.head("Market Daily Report", 1)
     out = [P, '<h1 id="top">📊 Market Daily Report</h1>',
@@ -529,14 +565,24 @@ def render_report(data) -> str:
         for a in members:
             iid = a["id"]
             sc = a["northstar_score"]
-            lab, col = score_label(sc)
+            lab, col = score_label(sc, a)
             gb = a.get("gold_beat")
             if gb is None:
                 gb_html = '<span class="muted">vs gull: n/a</span>'
-            elif gb.get("beats"):
-                gb_html = f'<span class="up">▲ slår gull ({"+".join(gb.get("tf_over") or [])})</span>'
             else:
-                gb_html = '<span class="down">▼ taper mot gull</span>'
+                roc3 = (gb.get("roc") or {}).get("3M")
+                mans = gb.get("mansfield")
+                mans_s = ""
+                if mans is not None:
+                    mc = PALETTE["up"] if mans > 0 else PALETTE["down"]
+                    mans_s = f' · <span style="color:{mc}">Mansfield {mans:+.0f}</span>'
+                if gb.get("beats"):
+                    r3s = f" {roc3:+.1f}%" if roc3 is not None else ""
+                    gb_html = (f'<span class="up">▲ slår gull (pris/gull-forhold,{" ".join(gb.get("tf_over") or [])}'
+                               f'{r3s})</span>{mans_s}')
+                else:
+                    r3s = f" {roc3:+.1f}%" if roc3 is not None else ""
+                    gb_html = f'<span class="down">▼ taper mot gull (3M{r3s})</span>{mans_s}'
             sym = a.get("symbol_label", iid)
             rm = a.get("risk", {})
             risk_str = ""
@@ -545,7 +591,7 @@ def render_report(data) -> str:
                             f'maxDD {rm["max_dd"]:.0f}% · Sharpe {rm["sharpe"]:.2f}</span>'
                             if rm.get("sharpe") is not None else
                             f'<span class="muted">vol {rm["vol"]:.0f}%</span>')
-            # NSBC-tilstand + evidens-badges + stretched-varsel
+            # NSBC-tilstand + evidens-badges
             lt = a.get("lt_state"); st = a.get("st_state")
             def _sb(s):
                 return ('<span class="up">bull</span>' if s == "bull"
@@ -556,12 +602,23 @@ def render_report(data) -> str:
             ticks = a.get("ticks", 0)
             ev_html = (f'<span class="tag" style="color:{PALETTE["good"]}">✓ {ticks} bevis</span>'
                        if ticks else "")
-            stretch_html = ('<span class="pill" style="background:#D55E0022;color:#D55E00">⚠ stretched (FOMO)</span>'
-                            if a.get("stretched") else "")
+            # Stage-badge (Weinstein) — skiller nedtrend fra strukket
+            stg = a.get("stage"); stg_lab = a.get("stage_label", "")
+            stg_col = {4: PALETTE["down"], 3: PALETTE["warn"], 2: PALETTE["up"],
+                       1: PALETTE["accent"]}.get(stg, PALETTE["muted"])
+            stage_html = (f'<span class="pill" style="background:{stg_col}22;color:{stg_col}">{html.escape(stg_lab)}</span>'
+                          if stg_lab else "")
             brk_html = ('<span class="pill" style="background:#0072B222;color:#0072B2">▲ breakout</span>'
                         if a.get("breakout") else "")
             ev_detail = (f'<div class="muted" style="font-size:11px;margin:2px 0">Evidens: {", ".join(ev)}</div>'
                          if ev else "")
+            # Avstand fra 12 & 36 MA — ukentlig OG månedlig (alltid med tidsramme)
+            dist_html = _dist_display(a)
+            # Forklaring (stage-reason) i klartekst
+            reason = a.get("stage_reason", "")
+            reason_html = (f'<div class="explain"><span class="ex-what">{html.escape(reason)}</span> '
+                           f'<span class="ex-do">→ {html.escape(glossary.detail("nsbc_score"))}</span></div>'
+                           if reason else "")
             chart_id = f"ch_{iid}"
             chart_init.append({"el": chart_id, "series": a.get("price_series", [])})
             out.append(
@@ -570,11 +627,11 @@ def render_report(data) -> str:
                 f'<h3>{html.escape(a.get("display_name", iid))}</h3>'
                 f'<span class="tag">{html.escape(sym)}</span>'
                 f'<span class="pill" style="background:{col}22;color:{col}">Score {sc} · {html.escape(lab)}</span>'
-                f'{state_html}{ev_html}{brk_html}{stretch_html}'
+                f'{stage_html}{state_html}{ev_html}{brk_html}'
                 f'{gb_html}'
                 f'<a class="tv" href="{_tv(sym,"GLD")}" target="_blank" rel="noopener">📊 {html.escape(sym)}/GLD</a>'
                 f'</div>'
-                f'{ev_detail}'
+                f'{ev_detail}{dist_html}{reason_html}'
                 f'<div style="margin:4px 0">{risk_str}</div>'
                 f'<div class="lwc" id="{chart_id}"></div>'
                 f'</div>')
