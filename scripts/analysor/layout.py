@@ -60,6 +60,10 @@ h1 {{ font-size:22px; margin:6px 0 2px; }}
 h2 {{ font-size:17px; margin:22px 0 6px; }}
 h3 {{ font-size:14px; margin:0; }}
 .sub {{ color:var(--muted); font-size:12px; margin:0 0 10px; }}
+.explain {{ font-size:11.5px; line-height:1.5; margin:5px 0 2px; padding:6px 9px;
+  background:var(--panel2); border-left:2px solid var(--accent); border-radius:4px; }}
+.explain .ex-what {{ color:var(--text); }}
+.explain .ex-do {{ color:var(--muted); }}
 .section {{ background:var(--panel); border:1px solid var(--border); border-radius:14px;
   padding:16px; margin:14px 0; }}
 .grid {{ display:grid; gap:12px; }}
