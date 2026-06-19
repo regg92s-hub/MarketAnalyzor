@@ -37,6 +37,7 @@ def frame_evidence(df: pd.DataFrame) -> dict:
     tn = ind.trend_navigator(c, 12, 36)
     ich = ind.ichimoku(high, low, c)
     dist = ind.dist_from_ma(c, 36)
+    dist12 = ind.dist_from_ma(c, 12)
     srsi = ind.stoch_rsi(c)
     brk = ind.breakout_state(high, low, c)
 
@@ -48,6 +49,7 @@ def frame_evidence(df: pd.DataFrame) -> dict:
         "cloud": ich.get("position"),        # above / inside / below
         "future_bull": ich.get("future_bull"),
         "dist36": dist["dist"],
+        "dist12": dist12["dist"],
         "dist_crossed_up": dist["crossed_up"],
         "stretched": dist["stretched"],
         "below_zero": dist.get("below_zero"),
@@ -144,13 +146,73 @@ def entry_quality(weekly: dict, monthly: dict, quarterly: dict) -> tuple[int, di
         raw = min(raw, 30)
 
     score = int(np.clip(round(raw), 0, 100))
+    stage = classify_stage(weekly, monthly)
     return score, {
         "long_term": lt, "short_term": st, "ticks": ticks,
         "evidence": detail,
         "stretched": bool(weekly.get("stretched")),
         "dist36": weekly.get("dist36"),
         "breakout": bool(weekly.get("breakout")),
+        "stage": stage["stage"],
+        "stage_label": stage["label"],
+        "stage_reason": stage["reason"],
     }
+
+
+def classify_stage(weekly: dict, monthly: dict) -> dict:
+    """
+    Weinstein stage-analyse (1-4) — løser tvetydigheten stretched vs nedtrend.
+    NSBC nedstammer fra Weinstein (Karim siterer 'Stan Weinstein's Secrets').
+
+      Stage 1 — Basing/akkumulering: flat MA, pris pendler rundt 36-MA.
+      Stage 2 — Opptrend: over stigende 12&36 MA + over sky.
+      Stage 3 — Topping/distribusjon: flat MA etter opptur, momentum avtar.
+      Stage 4 — Nedtrend: UNDER fallende MA + under sky. (= lav score, IKKE stretched)
+
+    Stretched/FOMO er en UNDER-tilstand av Stage 2 (opptrend, men strukket) —
+    aldri det samme som Stage 4 (nedtrend). Det er kjernen i feilrettingen.
+    """
+    if not weekly:
+        return {"stage": None, "label": "Ukjent", "reason": "for lite data"}
+
+    trend = weekly.get("trend")          # bull / neutral / bear
+    cloud = weekly.get("cloud")          # above / inside / below
+    above_ma = weekly.get("above_both_ma")
+    below_zero = weekly.get("below_zero")
+    stretched = weekly.get("stretched")
+    dist = weekly.get("dist36")
+    breakout = weekly.get("breakout")
+    s_over_l = weekly.get("s_over_l", None)
+
+    # Stage 4: nedtrend — under MA og sky, fallende
+    if trend == "bear" and cloud == "below":
+        return {"stage": 4, "label": "Nedtrend (Stage 4)",
+                "reason": f"under 12&36-MA og under sky, momentum {dist:+.0f}% under null"
+                          if dist is not None else "under 12&36-MA og under sky"}
+    if (not above_ma) and below_zero and cloud in ("below", "inside"):
+        return {"stage": 4, "label": "Nedtrend (Stage 4)",
+                "reason": "under glidende snitt, negativ momentum"}
+
+    # Stage 2: opptrend — over stigende MA + over sky
+    if above_ma and cloud == "above" and trend == "bull":
+        if stretched:
+            return {"stage": 2, "label": "Strukket (FOMO-sone)",
+                    "reason": f"opptrend, men {dist:+.0f}% over 36-MA — høy risiko å gå inn, "
+                              "eier kan holde" if dist is not None else "opptrend men strukket"}
+        if breakout:
+            return {"stage": 2, "label": "Opptrend – breakout",
+                    "reason": "over stigende 12&36-MA, over sky, bryter ut av base"}
+        return {"stage": 2, "label": "Opptrend (Stage 2)",
+                "reason": "over stigende 12&36-MA og over sky"}
+
+    # Stage 3: distribusjon — var over, men momentum faller / under én MA
+    if (s_over_l or cloud == "above") and (below_zero or trend == "neutral"):
+        return {"stage": 3, "label": "Distribusjon (Stage 3)",
+                "reason": "momentum avtar etter opptur — vær varsom"}
+
+    # Stage 1: basing — flatt, rundt MA, ingen klar retning
+    return {"stage": 1, "label": "Basing (Stage 1)",
+            "reason": "pendler rundt glidende snitt — bygger mulig base"}
 
 
 def nsbc_score(frames: dict) -> tuple[int, dict]:
@@ -168,15 +230,33 @@ def northstar_score(frames: dict) -> tuple[int, dict]:
     return nsbc_score(frames)
 
 
-def score_label(score: int) -> tuple[str, str]:
-    """(tekst, farge). NSBC: høyt = ekte lavrisiko-entry (ikke stretched + breakout)."""
+def score_label(score: int, meta: dict | None = None) -> tuple[str, str]:
+    """
+    (tekst, farge). KORRIGERT: skiller nedtrend fra strukket.
+    Lav score kan bety enten Stage 4 (nedtrend) ELLER strukket — aldri begge.
+    Bruk stage-etiketten når meta er tilgjengelig.
+    """
+    if meta and meta.get("stage_label"):
+        sl = meta["stage_label"]
+        if score >= 70:
+            return "Lavrisiko-entry", PALETTE["up"]
+        if "Strukket" in sl:
+            return sl, PALETTE["warn"]          # opptrend men FOMO
+        if "Nedtrend" in sl:
+            return sl, PALETTE["down"]          # Stage 4 — IKKE stretched
+        if score >= 55:
+            return sl, PALETTE["accent"]
+        if score >= 40:
+            return sl, PALETTE["warn"]
+        return sl, PALETTE["down"]
+    # Fallback uten meta
     if score >= 70:
         return "Lavrisiko-entry", PALETTE["up"]
     if score >= 55:
         return "Konstruktiv", PALETTE["accent"]
     if score >= 40:
         return "Avvent base/breakout", PALETTE["warn"]
-    return "Høy risiko / stretched", PALETTE["down"]
+    return "Svakt oppsett", PALETTE["down"]
 
 
 def state_label(lt: str, st: str) -> str:
