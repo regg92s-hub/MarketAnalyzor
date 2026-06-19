@@ -88,10 +88,20 @@ def beats_baseline(num: pd.Series, den: pd.Series, horizons_check: list,
     beats = any((checks[h] or 0) > 0 for h in avail) if avail else None
     loses = all((checks[h] or 0) <= 0 for h in avail) if avail else None
     tf_over = [h for h in avail if (checks[h] or 0) > 0]
+    # Mansfield relativ styrke: ratio normalisert mot eget 52-ukers (252d) snitt.
+    # Over 0 = leder baseline (NSBC-native nullinje-test).
+    comb = pd.DataFrame({"n": num, "d": den}).dropna()
+    mansfield = None
+    if len(comb) > 260:
+        rp = (comb["n"] / comb["d"]) * 100
+        sma = rp.rolling(252).mean()
+        if pd.notna(sma.iloc[-1]) and sma.iloc[-1] != 0:
+            mansfield = round(float((rp.iloc[-1] / sma.iloc[-1] - 1) * 100), 1)
     return {
         "beats": (bool(beats) if beats is not None else None),
         "loses": (bool(loses) if loses is not None else None),
         "tf_over": tf_over,
+        "mansfield": mansfield,
         "roc": rocs,
         "composite": rr["composite"],
     }
