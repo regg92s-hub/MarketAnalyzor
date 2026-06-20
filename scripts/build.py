@@ -23,6 +23,21 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import pandas as pd  # noqa: E402
+import numpy as np  # noqa: E402
+
+
+def _json_default(o):
+    """Gjør numpy-typer (bool_, int64, float64) JSON-serialiserbare."""
+    if isinstance(o, (np.bool_,)):
+        return bool(o)
+    if isinstance(o, (np.integer,)):
+        return int(o)
+    if isinstance(o, (np.floating,)):
+        return float(o)
+    if isinstance(o, (np.ndarray,)):
+        return o.tolist()
+    raise TypeError(f"Object of type {o.__class__.__name__} is not JSON serializable")
+
 from analysor import config, data as datamod, scoring, analytics, regime as regimemod, render, portfolio, backtest as backtestmod, benchmarks as benchmarksmod, paper, roadmap as roadmapmod, validation as validationmod  # noqa: E402
 from analysor.config import VERSION, PALETTE  # noqa: E402
 from analysor.layout import LWC_CDN, LWC_LOCAL  # noqa: E402
@@ -42,6 +57,57 @@ def price_series_for_chart(df: pd.DataFrame, days: int = CHARTS_HISTORY_DAYS):
     """[(YYYY-MM-DD, close)] for Lightweight Charts."""
     c = df["close_use"].dropna().tail(days)
     return [(idx.strftime("%Y-%m-%d"), round(float(v), 4)) for idx, v in c.items()]
+
+
+def chart_data_nsbc(df: pd.DataFrame, days: int = 350) -> dict:
+    """
+    Rik chart-data med NSBC-indikatorer (beregnet i pandas, sendt som serier):
+    candles (OHLC), 12 & 36 SMA, Ichimoku-sky (span A/B). Tegnes på ukentlig
+    oppløsning (NSBCs mellom-bilde). Payload-trimmet: ~70 uker, 2-3 desimaler.
+    """
+    import numpy as np
+    d = df.dropna(subset=["close_use"])
+    if len(d) < 60:
+        return {}
+    wk = pd.DataFrame()
+    wk["close"] = d["close_use"].resample("W-FRI").last()
+    wk["high"] = (d["high"] if "high" in d else d["close_use"]).resample("W-FRI").max()
+    wk["low"] = (d["low"] if "low" in d else d["close_use"]).resample("W-FRI").min()
+    wk["open"] = (d["open"] if "open" in d else d["close_use"]).resample("W-FRI").first()
+    wk = wk.dropna()
+    if len(wk) < 60:
+        return {}
+    weeks = min(len(wk), days // 5)
+    wk = wk.tail(weeks + 60)
+
+    sma12 = wk["close"].rolling(12).mean()
+    sma36 = wk["close"].rolling(36).mean()
+    conv = (wk["high"].rolling(9).max() + wk["low"].rolling(9).min()) / 2
+    base = (wk["high"].rolling(26).max() + wk["low"].rolling(26).min()) / 2
+    span_a = ((conv + base) / 2)
+    span_b = (wk["high"].rolling(52).max() + wk["low"].rolling(52).min()) / 2
+
+    # Adaptiv presisjon: små priser (ratioer) trenger flere desimaler
+    lastv = float(wk["close"].iloc[-1])
+    nd = 2 if lastv >= 10 else (4 if lastv >= 0.1 else 6)
+
+    def ser(s):
+        s = s.dropna().tail(weeks)
+        return [(idx.strftime("%y-%m-%d"), round(float(v), nd)) for idx, v in s.items()]
+
+    def candle_ser():
+        out = []
+        for idx, row in wk.tail(weeks).iterrows():
+            out.append({"t": idx.strftime("%y-%m-%d"),
+                        "o": round(float(row["open"]), nd), "h": round(float(row["high"]), nd),
+                        "l": round(float(row["low"]), nd), "c": round(float(row["close"]), nd)})
+        return out
+
+    return {
+        "candles": candle_ser(),
+        "sma12": ser(sma12), "sma36": ser(sma36),
+        "cloud_a": ser(span_a), "cloud_b": ser(span_b),
+    }
 
 
 def main():
@@ -88,6 +154,7 @@ def main():
         a["missing_data"] = False
         a["price_last"] = round(float(df["close_use"].iloc[-1]), 4)
         a["price_series"] = price_series_for_chart(df)
+        a["chart_nsbc"] = chart_data_nsbc(df)
         a["risk"] = ind.risk_metrics(df["close_use"], config.RISK_LOOKBACK_DAYS, config.RISK_FREE_ANNUAL)
         # NSBC-tilstand: langtid (regime) × korttid (timing) + evidens
         a["lt_state"] = meta.get("long_term")
@@ -180,12 +247,15 @@ def main():
     genres = analytics.genre_strength(raw, assets_meta)
     universe = [m["id"] for m in meta_list if not assets.get(m["id"], {}).get("missing_data")]
     breadth = analytics.breadth(raw, universe)
+    glob_breadth = analytics.global_breadth(raw, config.BREADTH_GLOBAL_IDS)
     pairs = analytics.cyclical_pairs(raw)
     flow = analytics.money_flow(raw)
     rot = analytics.rotation(raw, assets_meta)
     rrg = analytics.build_rrg(raw, assets_meta)
     corr = analytics.build_correlation(raw)
     bt = backtestmod.run_backtest(raw, config.CYCLICAL_IDS, top_n=5)
+    # Anbefalings-backtest: "hvis alle NSBC-anbefalinger var fulgt"
+    rec_bt = backtestmod.run_recommendation_backtest(raw, config.CYCLICAL_IDS)
     # Auto-roadmaps (NSBC-stil) for hele universet
     roadmaps = roadmapmod.build_all_roadmaps(raw, assets_meta, gld=raw.get("GLD"))
     # Hit-rate-validering fra score-historikk
@@ -212,7 +282,7 @@ def main():
         for k in ("dates", "scores", "states"):
             rhist[k] = rhist[k][-365:]
     with open(DOCS / "regime_history.json", "w", encoding="utf-8") as f:
-        json.dump(rhist, f, separators=(",", ":"))
+        json.dump(rhist, f, separators=(",", ":"), default=_json_default)
 
     # Paper-ledger ("regelen vs deg") + brukerens synkede portefølje
     usdnok_now = (round(float(raw["NOK"]["close_use"].iloc[-1]), 4)
@@ -226,7 +296,7 @@ def main():
         if not ledger["actual_curve"] or ledger["actual_curve"][-1][0] != today:
             ledger["actual_curve"].append((today, user_val["total_nok"]))
     with open(DOCS / "paper_ledger.json", "w", encoding="utf-8") as f:
-        json.dump(ledger, f, separators=(",", ":"))
+        json.dump(ledger, f, separators=(",", ":"), default=_json_default)
 
     # 5. Samlet datamodell
     model = {
@@ -238,12 +308,14 @@ def main():
         "ranking_dxy": ranking_dxy,
         "genre_strength": genres,
         "breadth": breadth,
+        "global_breadth": glob_breadth,
         "cyclical_pairs": pairs,
         "money_flow": flow,
         "rotation": rot,
         "rrg": rrg,
         "correlation": corr,
         "backtest": bt,
+        "rec_backtest": rec_bt,
         "roadmaps": roadmaps,
         "validation": validation,
         "regime": reg,
@@ -266,7 +338,7 @@ def main():
     changes = compute_changes(prev, snapshot)
     model["changes"] = changes
     with open(DOCS / "signals.json", "w", encoding="utf-8") as f:
-        json.dump(snapshot, f, ensure_ascii=False, separators=(",", ":"))
+        json.dump(snapshot, f, ensure_ascii=False, separators=(",", ":"), default=_json_default)
     log(f"signals.json skrevet ({len(changes)} endringer siden forrige bygg)")
     notify_discord(changes, user_val)
 
@@ -277,9 +349,29 @@ def main():
     # i beregnede signaler, aldri egne tall.
     model["ai_brief"] = build_ai_brief(model)
 
-    # 6. Skriv index.json (minifisert -> mindre payload, gzip på toppen via Pages)
+    # 6. Skriv index.json (minifisert). Strip tunge chart-data — trend-siden
+    # rendrer ikke per-instrument-charts, og report/roadmap-sidene embedder
+    # sine egne chart-data direkte i HTML. Dette holder index.json liten.
+    import copy as _copy
+    slim = dict(model)
+    slim_assets = {}
+    for iid, a in model.get("assets", {}).items():
+        a2 = {k: v for k, v in a.items() if k not in ("chart_nsbc", "price_series")}
+        slim_assets[iid] = a2
+    slim["assets"] = slim_assets
+    # Roadmaps: dropp candle-arrays fra index.json (kun HTML trenger dem)
+    slim_rm = {}
+    for iid, entry in model.get("roadmaps", {}).items():
+        e2 = {}
+        for variant, rm in entry.items():
+            if isinstance(rm, dict):
+                e2[variant] = {k: v for k, v in rm.items() if k != "chart"}
+            else:
+                e2[variant] = rm
+        slim_rm[iid] = e2
+    slim["roadmaps"] = slim_rm
     with open(DOCS / "index.json", "w", encoding="utf-8") as f:
-        json.dump(model, f, ensure_ascii=False, separators=(",", ":"))
+        json.dump(slim, f, ensure_ascii=False, separators=(",", ":"), default=_json_default)
     log(f"index.json skrevet ({(DOCS/'index.json').stat().st_size} bytes)")
 
     # 7. HTML-sider
@@ -358,7 +450,7 @@ def append_score_history(assets: dict):
     hdir = DOCS / "history"
     hdir.mkdir(parents=True, exist_ok=True)
     with open(hdir / "score_history.json", "w", encoding="utf-8") as f:
-        json.dump(hist, f, separators=(",", ":"))
+        json.dump(hist, f, separators=(",", ":"), default=_json_default)
     log(f"score_history.json: {len(hist)} datoer")
 
 
