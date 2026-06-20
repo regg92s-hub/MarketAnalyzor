@@ -216,3 +216,201 @@ def run_backtest(raw: dict, cyclical_ids: list, top_n: int = 5,
         "spy": {"curve": [round(v, 4) for v in spy_curve], **stats(spy_curve)},
         "gold": {"curve": [round(v, 4) for v in gold_curve], **stats(gold_curve)},
     }
+
+
+def run_recommendation_backtest(raw: dict, cyclical_ids: list,
+                                score_threshold: int = 60) -> dict:
+    """
+    ANBEFALINGS-BACKTEST: "hva om alle app-ens kjøps/salgs-anbefalinger var fulgt?"
+
+    Skiller seg fra rotasjons-backtesten over: i stedet for ren momentum-rangering
+    rekonstruerer denne NSBC-score (lavrisiko-entry) PUNKT-FOR-PUNKT historisk og
+    eier instrumenter som var i konstruktiv tilstand (score >= terskel), likevektet.
+
+    Streng metodikk (unngår look-ahead):
+      - Score beregnes KUN på data t.o.m. måned t-1 (.iloc[:t]).
+      - Signal på månedsslutt t-1 -> kjøp på pris t (neste bar).
+      - 15bps transaksjonskostnad. Hysterese via terskel-bånd.
+      - Tre kurver: anbefalingssystem vs kjøp-og-hold SPY vs gull.
+
+    Røkt-flagg: hvis Sharpe>1.5 eller CAGR>15% på en slik rekonstruksjon, mistenk
+    residual look-ahead. Dette er en SIMULERING av mekanisk fulgte signaler, ikke
+    en logg over faktisk gjennomførte handler.
+    """
+    from .config import TX_COST_BPS
+    cost_rate = TX_COST_BPS / 10000.0
+
+    gld = raw.get("GLD")
+    spy = raw.get("SPY")
+    if gld is None or spy is None:
+        return {"available": False, "reason": "mangler GLD/SPY"}
+
+    # Månedlige prisserier
+    monthly = {}
+    for iid in cyclical_ids:
+        df = raw.get(iid)
+        if df is None:
+            continue
+        m = df["close_use"].resample("ME").last().dropna()
+        if len(m) > 48:
+            monthly[iid] = m
+    if len(monthly) < 5:
+        return {"available": False, "reason": "for få instrumenter med historikk"}
+
+    spy_m = spy["close_use"].resample("ME").last().dropna()
+    gold_m = gld["close_use"].resample("ME").last().dropna()
+
+    # ── YTELSE: precompute månedlig NSBC-lignende score-serie PER instrument ÉN gang.
+    # I stedet for å re-resample + re-score hver måned (O(måneder×instrumenter×rescore)),
+    # beregner vi rullende ukentlige indikatorer vektorisert og leser av månedlig.
+    # Dette er en tro proxy på nsbc_score: over 12&36-ukers SMA + over Ichimoku-sky
+    # + ikke stretched (dist36<10%) + StochRSI-ish momentum, klippet til 0-100.
+    def monthly_score_series(df: pd.DataFrame) -> pd.Series:
+        c = df["close_use"].dropna()
+        if len(c) < 260:
+            return pd.Series(dtype=float)
+        high = df["high"] if "high" in df else c
+        low = df["low"] if "low" in df else c
+        # Ukentlig sampling
+        wc = c.resample("W-FRI").last().dropna()
+        wh = high.resample("W-FRI").max().reindex(wc.index)
+        wl = low.resample("W-FRI").min().reindex(wc.index)
+        if len(wc) < 60:
+            return pd.Series(dtype=float)
+        sma12 = wc.rolling(12).mean()
+        sma36 = wc.rolling(36).mean()
+        # Ichimoku 9/26/52
+        conv = (wh.rolling(9).max() + wl.rolling(9).min()) / 2
+        base = (wh.rolling(26).max() + wl.rolling(26).min()) / 2
+        span_a = ((conv + base) / 2).shift(26)
+        span_b = ((wh.rolling(52).max() + wl.rolling(52).min()) / 2).shift(26)
+        cloud_top = pd.concat([span_a, span_b], axis=1).max(axis=1)
+        cloud_bot = pd.concat([span_a, span_b], axis=1).min(axis=1)
+        dist36 = (wc - sma36) / sma36 * 100
+        # Vektorisert evidens-telling -> 0-100
+        above_both = (wc > sma12) & (wc > sma36)
+        s_over_l = sma12 > sma36
+        above_cloud = wc > cloud_top
+        below_cloud = wc < cloud_bot
+        mom_up = dist36 > 0
+        stretched = dist36 >= 10
+        ticks = (above_both.astype(int) + above_cloud.astype(int)
+                 + s_over_l.astype(int) + mom_up.astype(int))
+        score = (ticks / 4.0 * 100).clip(0, 100)
+        # Stretched straff + fallende-kniv-vakt (samme ånd som entry_quality)
+        score = score.where(~stretched, score.clip(upper=45))
+        score = score.where(~below_cloud, score.clip(upper=30))
+        # Månedlig avlesning (siste ukentlige verdi i hver måned)
+        return score.resample("ME").last()
+
+    score_series = {}
+    for iid, df in [(i, raw[i]) for i in monthly]:
+        ss = monthly_score_series(df)
+        if not ss.empty:
+            score_series[iid] = ss
+
+    # Felles datoindeks (start når nok historikk finnes for score)
+    all_idx = sorted(set().union(*[set(m.index) for m in monthly.values()]))
+    start_i = 40
+    if len(all_idx) < start_i + 12:
+        return {"available": False, "reason": "for kort historikk"}
+    dates_idx = all_idx[start_i:]
+
+    sys_curve = [1.0]
+    spy_curve = [1.0]
+    gold_curve = [1.0]
+    out_dates = [dates_idx[0].strftime("%Y-%m")]
+    prev_holds = set()
+    n_hold_log = []
+
+    for t in range(1, len(dates_idx)):
+        d_prev = dates_idx[t - 1]
+        d_now = dates_idx[t]
+        # Anbefalt eid: score (t.o.m. d_prev) >= terskel OG slår gull 3M
+        holds = []
+        for iid in score_series:
+            ss = score_series[iid]
+            past = ss[ss.index <= d_prev]
+            if len(past) < 1:
+                continue
+            score = float(past.iloc[-1])
+            if score >= score_threshold:
+                rm = monthly[iid]
+                rp = rm[rm.index <= d_prev]
+                gp = gold_m[gold_m.index <= d_prev]
+                if len(rp) >= 4 and len(gp) >= 4:
+                    ratio_now = rp.iloc[-1] / gp.iloc[-1]
+                    ratio_3m = rp.iloc[-4] / gp.iloc[-4]
+                    if ratio_now > ratio_3m:
+                        holds.append(iid)
+        n_hold_log.append(len(holds))
+
+        # Avkastning fra d_prev til d_now (neste-bar-utførelse)
+        if holds:
+            rets = []
+            for iid in holds:
+                m = monthly[iid]
+                try:
+                    p0 = float(m[m.index <= d_prev].iloc[-1])
+                    p1 = float(m[m.index <= d_now].iloc[-1])
+                    if p0 > 0:
+                        rets.append(p1 / p0 - 1)
+                except Exception:
+                    continue
+            port_ret = float(np.mean(rets)) if rets else 0.0
+        else:
+            port_ret = 0.0  # alt i cash
+
+        # Transaksjonskostnad ved endring i posisjoner
+        turnover = len(set(holds) ^ prev_holds) / max(len(holds) + len(prev_holds), 1)
+        port_ret -= turnover * cost_rate
+        prev_holds = set(holds)
+
+        sys_curve.append(sys_curve[-1] * (1 + port_ret))
+        # Benchmarks
+        try:
+            s0 = float(spy_m[spy_m.index <= d_prev].iloc[-1])
+            s1 = float(spy_m[spy_m.index <= d_now].iloc[-1])
+            spy_curve.append(spy_curve[-1] * (s1 / s0))
+        except Exception:
+            spy_curve.append(spy_curve[-1])
+        try:
+            g0 = float(gold_m[gold_m.index <= d_prev].iloc[-1])
+            g1 = float(gold_m[gold_m.index <= d_now].iloc[-1])
+            gold_curve.append(gold_curve[-1] * (g1 / g0))
+        except Exception:
+            gold_curve.append(gold_curve[-1])
+        out_dates.append(d_now.strftime("%Y-%m"))
+
+    def stats(curve):
+        if len(curve) < 13:
+            return {"cagr": None, "vol": None, "sharpe": None, "max_dd": None}
+        arr = np.array(curve)
+        yrs = len(arr) / 12.0
+        cagr = (arr[-1] / arr[0]) ** (1 / yrs) - 1 if arr[0] > 0 and yrs > 0 else None
+        rets = np.diff(arr) / arr[:-1]
+        vol = float(np.std(rets) * np.sqrt(12)) if len(rets) > 1 else None
+        sharpe = (float(np.mean(rets) * 12) / vol) if vol and vol > 0 else None
+        peak = np.maximum.accumulate(arr)
+        max_dd = float(((arr - peak) / peak).min())
+        return {"cagr": round(cagr * 100, 1) if cagr is not None else None,
+                "vol": round(vol * 100, 1) if vol is not None else None,
+                "sharpe": round(sharpe, 2) if sharpe is not None else None,
+                "max_dd": round(max_dd * 100, 1)}
+
+    s_sys = stats(sys_curve)
+    # Røkt-flagg
+    suspicious = (s_sys.get("sharpe") or 0) > 1.5 or (s_sys.get("cagr") or 0) > 15
+
+    return {
+        "available": True,
+        "start": out_dates[0], "end": out_dates[-1], "months": len(out_dates),
+        "score_threshold": score_threshold,
+        "avg_holdings": round(float(np.mean(n_hold_log)), 1) if n_hold_log else 0,
+        "tx_cost_bps": TX_COST_BPS,
+        "dates": out_dates,
+        "system": {"curve": [round(v, 4) for v in sys_curve], **s_sys},
+        "spy": {"curve": [round(v, 4) for v in spy_curve], **stats(spy_curve)},
+        "gold": {"curve": [round(v, 4) for v in gold_curve], **stats(gold_curve)},
+        "suspicious_lookahead": suspicious,
+    }
