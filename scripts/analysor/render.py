@@ -112,9 +112,10 @@ def render_trend(data) -> str:
 
     # Markedsbredde (flyttet opp – overordnet markedstilstand først)
     br = data.get("breadth", {})
+    gb = data.get("global_breadth", {})
     if br:
         out.append('<section class="section"><h2>📐 Markedsbredde</h2>'
-                   '<p class="sub">Andel av universet over 50- og 200-dagers MA. '
+                   '<p class="sub">Andel av universet over 50- og 200-dagers MA (daglig). '
                    'Bred deltakelse bekrefter trend; smal bredde varsler svekkelse.</p>'
                    '<div class="sector-grid">')
         for ma in (50, 200):
@@ -122,10 +123,18 @@ def render_trend(data) -> str:
             n = br.get(f"n_{ma}ma", 0)
             col = PALETTE["up"] if (v or 0) >= 50 else PALETTE["down"]
             icon = "▲" if (v or 0) >= 50 else "▼"
-            out.append(f'<div class="sc"><div class="sc-name">Over {ma}-dagers MA</div>'
+            out.append(f'<div class="sc"><div class="sc-name">Over {ma}-dagers MA (daglig)</div>'
                        f'<div class="sc-score" style="color:{col}">{icon} {v if v is not None else "–"}%</div>'
                        f'<div class="sc-label muted">{n} instrumenter</div></div>')
-        out.append('</div></section>')
+        # Global bredde (land + sektorer over 200d)
+        if gb and gb.get("pct_over_200d") is not None:
+            out.append(f'<div class="sc" style="border-color:{gb["col"]}55">'
+                       f'<div class="sc-name">Global bredde: land+sektorer over 200-dagers MA (daglig)</div>'
+                       f'<div class="sc-score" style="color:{gb["col"]}">{gb["pct_over_200d"]}%</div>'
+                       f'<div class="sc-label" style="color:{gb["col"]}">{html.escape(gb["state"])} · {gb["over"]}/{gb["n"]}</div></div>')
+        out.append('</div>')
+        out.append(glossary.box("breadth"))
+        out.append('</section>')
 
     # Money flow (flyttet opp)
     mf = data.get("money_flow", [])
@@ -620,7 +629,8 @@ def render_report(data) -> str:
                            f'<span class="ex-do">→ {html.escape(glossary.detail("nsbc_score"))}</span></div>'
                            if reason else "")
             chart_id = f"ch_{iid}"
-            chart_init.append({"el": chart_id, "series": a.get("price_series", [])})
+            chart_init.append({"el": chart_id, "series": a.get("price_series", []),
+                               "nsbc": a.get("chart_nsbc", {})})
             out.append(
                 f'<div class="section" style="margin:10px 0">'
                 f'<div style="display:flex;flex-wrap:wrap;gap:8px;align-items:baseline">'
@@ -649,20 +659,42 @@ def _lwc_init_js(charts) -> str:
 const CHARTS = %s;
 function mkChart(c){
   const el = document.getElementById(c.el);
-  if(!el || !window.LightweightCharts || !c.series.length) return;
+  if(!el || !window.LightweightCharts) return;
+  const n = c.nsbc || {};
+  const hasNsbc = n.candles && n.candles.length > 20;
   const chart = LightweightCharts.createChart(el, {
-    height: 240, layout:{background:{color:'transparent'}, textColor:'#9aa7b5'},
+    height: hasNsbc ? 300 : 240, layout:{background:{color:'transparent'}, textColor:'#9aa7b5'},
     grid:{vertLines:{color:'#1a1f26'}, horzLines:{color:'#1a1f26'}},
     rightPriceScale:{borderColor:'#262d36'}, timeScale:{borderColor:'#262d36'},
     crosshair:{mode:0}
   });
-  const s = chart.addAreaSeries({lineColor:'#0072B2', topColor:'rgba(0,114,178,0.30)',
-    bottomColor:'rgba(0,114,178,0.02)', lineWidth:2});
-  s.setData(c.series.map(p => ({time:p[0], value:p[1]})));
+  if(hasNsbc){
+    // Ichimoku-sky: tegn span A og B som linjer; fyll mellom via baseline-triks.
+    // To area-serier (A topp, B bunn) gir en visuell sky.
+    try {
+      const cloudA = chart.addLineSeries({color:'rgba(0,158,115,0.55)', lineWidth:1, priceLineVisible:false, lastValueVisible:false});
+      const cloudB = chart.addLineSeries({color:'rgba(213,94,0,0.55)', lineWidth:1, priceLineVisible:false, lastValueVisible:false});
+      cloudA.setData((n.cloud_a||[]).map(p=>({time:'20'+p[0],value:p[1]})));
+      cloudB.setData((n.cloud_b||[]).map(p=>({time:'20'+p[0],value:p[1]})));
+    } catch(e){}
+    // Candlesticks (kompakte nøkler t/o/h/l/c -> Lightweight Charts-format)
+    const candle = chart.addCandlestickSeries({
+      upColor:'#009E73', downColor:'#D55E00', borderVisible:false,
+      wickUpColor:'#009E73', wickDownColor:'#D55E00'});
+    candle.setData(n.candles.map(k=>({time:'20'+k.t, open:k.o, high:k.h, low:k.l, close:k.c})));
+    // 12 & 36 SMA (NSBC Trend Navigator)
+    const ma12 = chart.addLineSeries({color:'#56B4E9', lineWidth:1, priceLineVisible:false, lastValueVisible:false, title:'12'});
+    const ma36 = chart.addLineSeries({color:'#E69F00', lineWidth:2, priceLineVisible:false, lastValueVisible:false, title:'36'});
+    ma12.setData((n.sma12||[]).map(p=>({time:'20'+p[0],value:p[1]})));
+    ma36.setData((n.sma36||[]).map(p=>({time:'20'+p[0],value:p[1]})));
+  } else if(c.series && c.series.length) {
+    const s = chart.addAreaSeries({lineColor:'#0072B2', topColor:'rgba(0,114,178,0.30)',
+      bottomColor:'rgba(0,114,178,0.02)', lineWidth:2});
+    s.setData(c.series.map(p => ({time:p[0], value:p[1]})));
+  } else { return; }
   chart.timeScale().fitContent();
   new ResizeObserver(()=>chart.applyOptions({width:el.clientWidth})).observe(el);
 }
-// Lazy-init nar synlig (ytelse: ikke alle grafer pa en gang)
 const io = new IntersectionObserver((entries,obs)=>{
   entries.forEach(e=>{ if(e.isIntersecting){ const c=CHARTS.find(x=>x.el===e.target.id);
     if(c){ mkChart(c); obs.unobserve(e.target);} } });
@@ -837,8 +869,84 @@ def render_backtest(data) -> str:
 
     out.append(layout.lwc_script())
     out.append('<script>\nconst BT = ' + json.dumps(series) + ';\n' + _bt_chart_js() + '\n</script>')
+
+    # ── ANBEFALINGS-BACKTEST: "hvis alle anbefalinger var fulgt" ──
+    rb = data.get("rec_backtest", {})
+    out.append(_rec_backtest_section(rb))
+
     out.append(layout.foot())
     return "".join(out)
+
+
+def _rec_backtest_section(rb) -> str:
+    if not rb or not rb.get("available"):
+        reason = (rb or {}).get("reason", "ikke tilgjengelig")
+        return ('<section class="section"><h2>📋 Anbefalings-backtest</h2>'
+                f'<p class="sub">«Hvis alle NSBC-anbefalinger var fulgt» — {html.escape(reason)}.</p></section>')
+    sysd, sp, g = rb["system"], rb["spy"], rb["gold"]
+    parts = ['<section class="section" style="border:2px solid var(--accent)">',
+             '<h2>📋 Anbefalings-backtest: «hvis alle anbefalinger var fulgt»</h2>',
+             '<p class="sub">Dette er forskjellig fra rotasjons-regelen over. Her rekonstrueres '
+             '<strong>NSBC-scoren punkt-for-punkt historisk</strong>, og porteføljen eier alle '
+             f'instrumenter som var i konstruktiv tilstand (score ≥ {rb.get("score_threshold",60)}) '
+             'OG slo gull 3M — likevektet, månedlig. Signal på månedsslutt → kjøp neste måned '
+             '(ingen look-ahead), 15bps kostnad. '
+             f'Periode {rb["start"]} → {rb["end"]} ({rb["months"]} mnd), snitt {rb["avg_holdings"]} posisjoner.</p>']
+    parts.append('<table><thead><tr><th>Strategi</th><th style="text-align:right">CAGR</th>'
+                 '<th style="text-align:right">Vol</th><th style="text-align:right">Sharpe</th>'
+                 '<th style="text-align:right">Max DD</th></tr></thead><tbody>')
+    for name, d, col in [("Anbefalingssystem", sysd, PALETTE["up"]),
+                         ("Kjøp-og-hold SPY", sp, PALETTE["accent"]),
+                         ("Kjøp-og-hold gull", g, PALETTE["warn"])]:
+        parts.append(f'<tr><td style="color:{col};font-weight:600">{name}</td>'
+                     f'<td style="text-align:right">{d.get("cagr","–")}%</td>'
+                     f'<td style="text-align:right">{d.get("vol","–")}%</td>'
+                     f'<td style="text-align:right">{d.get("sharpe","–")}</td>'
+                     f'<td style="text-align:right" class="down">{d.get("max_dd","–")}%</td></tr>')
+    parts.append('</tbody></table>')
+    parts.append('<div class="lwc" id="recbt_chart" style="height:340px"></div>')
+    # Ærlig vurdering
+    sys_sharpe = sysd.get("sharpe") or 0
+    spy_sharpe = sp.get("sharpe") or 0
+    if rb.get("suspicious_lookahead"):
+        verdict = ('<div class="warn" style="font-weight:600">⚠ Mistenkelig høy ytelse '
+                   '(Sharpe>1,5 eller CAGR>15%) — kan tyde på residual look-ahead. Tolk med skepsis.</div>')
+    elif sys_sharpe > spy_sharpe:
+        verdict = (f'<div class="up" style="font-weight:600">✓ Anbefalingssystemet slår kjøp-og-hold SPY '
+                   f'risikojustert (Sharpe {sys_sharpe} vs {spy_sharpe}).</div>')
+    else:
+        verdict = (f'<div style="font-weight:600;color:var(--warn)">Anbefalingssystemet slår IKKE kjøp-og-hold SPY '
+                   f'risikojustert (Sharpe {sys_sharpe} vs {spy_sharpe}). Da bør det brukes som '
+                   'beslutnings-støtte, ikke som mekanisk «bruk dette»-signal.</div>')
+    parts.append(verdict)
+    parts.append('<details style="margin-top:8px"><summary style="cursor:pointer;color:var(--accent)">Metodikk &amp; forbehold</summary>'
+                 '<p class="sub" style="margin-top:8px">NSBC-score beregnes kun på data t.o.m. forrige måned '
+                 '(.iloc-snitt, ingen look-ahead). Signal på månedsslutt → fyll neste måned. Dette er en '
+                 '<strong>simulering av mekanisk fulgte signaler</strong>, ikke en logg over faktisk gjennomførte '
+                 'handler — reell diskresjonær timing ville avvike. Cash-avkastning antas 0%. '
+                 '<strong>Ikke finansrådgivning.</strong></p></details>')
+    parts.append('</section>')
+    # chart-data
+    rseries = {
+        "sys": [[rb["dates"][i], sysd["curve"][i]] for i in range(len(rb["dates"]))],
+        "spy": [[rb["dates"][i], sp["curve"][i]] for i in range(len(rb["dates"]))],
+        "gold": [[rb["dates"][i], g["curve"][i]] for i in range(len(rb["dates"]))],
+    }
+    parts.append('<script>\nconst RECBT = ' + json.dumps(rseries) + ';\n'
+                 '(function(){function initR(){var el=document.getElementById("recbt_chart");'
+                 'if(!el||!window.LightweightCharts)return;'
+                 'var chart=LightweightCharts.createChart(el,{height:340,'
+                 'layout:{background:{color:"transparent"},textColor:"#9aa7b5"},'
+                 'grid:{vertLines:{color:"#1a1f26"},horzLines:{color:"#1a1f26"}},'
+                 'rightPriceScale:{borderColor:"#262d36"},timeScale:{borderColor:"#262d36"}});'
+                 'var mk=function(d,c){var s=chart.addLineSeries({color:c,lineWidth:2});'
+                 's.setData(d.map(function(p){return {time:p[0]+"-01",value:p[1]};}));};'
+                 'mk(RECBT.sys,"#009E73");mk(RECBT.spy,"#56B4E9");mk(RECBT.gold,"#E69F00");'
+                 'chart.timeScale().fitContent();'
+                 'new ResizeObserver(function(){chart.applyOptions({width:el.clientWidth});}).observe(el);}'
+                 'if(window.LightweightCharts)initR();else window.addEventListener("load",initR);})();'
+                 '\n</script>')
+    return "".join(parts)
 
 
 def _bt_chart_js() -> str:
@@ -885,12 +993,14 @@ def render_roadmap(data) -> str:
     out.append('<div style="margin:8px 0"><button class="btn secondary" id="tgGold" '
                'onclick="toggleGold()">Vis priced-in-gold</button></div>')
 
+    rm_charts = []
     for iid in order:
         entry = roadmaps[iid]
         a = assets.get(iid, {})
         sym = a.get("symbol_label", iid)
         score = a.get("northstar_score", "–")
-        lab, col = score_label(score) if isinstance(score, int) else ("", PALETTE["muted"])
+        lab, col = score_label(score, a) if isinstance(score, int) else ("", PALETTE["muted"])
+        nominal = entry.get("nominal", {})
         out.append(f'<section class="section roadmap-card" data-id="{iid}">')
         out.append(f'<div style="display:flex;flex-wrap:wrap;gap:10px;align-items:baseline">'
                    f'<h2 style="margin:0">{html.escape(a.get("display_name", iid))}</h2>'
@@ -898,13 +1008,26 @@ def render_roadmap(data) -> str:
                    f'<span class="pill" style="background:{col}22;color:{col}">Score {score} · {html.escape(lab)}</span>'
                    f'<span class="muted" style="font-size:12px">{html.escape(a.get("state_label",""))}</span>'
                    f'</div>')
-        # nominal + gull-versjoner
-        out.append(f'<div class="rm-nominal">{_roadmap_block(entry.get("nominal"), sym)}</div>')
+        # Tegnet roadmap-chart (candles + 12/36 MA + S/R + mål + scenarioer)
+        chart = nominal.get("chart")
+        if chart and chart.get("candles"):
+            cid = f"rm_{iid}"
+            rm_charts.append({"el": cid, "chart": chart})
+            out.append(f'<div class="lwc" id="{cid}" style="height:340px"></div>')
+            out.append('<div style="font-size:11px;color:var(--muted);margin:2px 0 6px">'
+                       '🟦 12-MA · 🟧 36-MA · grønne linjer = motstand/mål · '
+                       'røde linjer = støtte/invalidering (ukentlig)</div>')
+        # Scenario-sammendrag (alltid synlig)
+        out.append(f'<div class="rm-nominal">{_roadmap_scenarios(nominal)}</div>')
+        # Detaljer i utvidbar seksjon (progressiv avsløring)
+        out.append('<details style="margin-top:8px"><summary style="cursor:pointer;color:var(--accent);font-size:13px">'
+                   'Vis tall-detaljer (nivåer, kanal, fib)</summary>'
+                   f'<div class="rm-nominal">{_roadmap_block(nominal, sym)}</div>')
         if entry.get("gold"):
             out.append(f'<div class="rm-gold" style="display:none">'
                        f'<p class="sub">Priced in gold ({html.escape(sym)}/GLD):</p>'
                        f'{_roadmap_block(entry.get("gold"), sym + "/GLD")}</div>')
-        out.append('</section>')
+        out.append('</details></section>')
 
     out.append('<script>function toggleGold(){'
                'var g=document.querySelectorAll(".rm-gold"),n=document.querySelectorAll(".rm-nominal");'
@@ -913,8 +1036,77 @@ def render_roadmap(data) -> str:
                'n.forEach(e=>e.style.display=show?"none":"block");'
                'document.getElementById("tgGold").textContent=show?"Vis nominell":"Vis priced-in-gold";}'
                '</script>')
+    out.append(layout.lwc_script())
+    out.append('<script>\n' + _roadmap_chart_js(rm_charts) + '\n</script>')
     out.append(layout.foot())
     return "".join(out)
+
+
+def _roadmap_scenarios(rm) -> str:
+    """Kompakt scenario-sammendrag (alltid synlig over detaljene)."""
+    if not rm:
+        return ""
+    sc = rm.get("scenarios", {})
+    last = rm.get("last")
+
+    def row(name, d, color):
+        t = d.get("target")
+        if t is None:
+            return ""
+        p = d.get("pct")
+        psign = f"{p:+.1f}%" if isinstance(p, (int, float)) else ""
+        return (f'<div style="padding:2px 0"><span style="color:{color};font-weight:700">{name}</span> '
+                f'<strong>{t:g}</strong> <span style="color:{color}">{psign}</span></div>')
+
+    inval = rm.get("invalidation")
+    inval_s = (f'<div style="padding:2px 0;color:{PALETTE["down"]}">⛔ Invalidering: <strong>{inval:g}</strong></div>'
+               if inval else "")
+    return ('<div style="display:flex;flex-wrap:wrap;gap:16px;margin:6px 0;font-size:13px">'
+            + row("🟢 Bull", sc.get("bull", {}), PALETTE["up"])
+            + row("⚪ Base", sc.get("base", {}), PALETTE["accent"])
+            + row("🔴 Bear", sc.get("bear", {}), PALETTE["down"])
+            + inval_s + '</div>')
+
+
+def _roadmap_chart_js(charts) -> str:
+    payload = json.dumps(charts)
+    return """
+const RMCHARTS = %s;
+function mkRm(c){
+  const el = document.getElementById(c.el);
+  if(!el || !window.LightweightCharts) return;
+  const d = c.chart;
+  const chart = LightweightCharts.createChart(el, {
+    height: 340, layout:{background:{color:'transparent'}, textColor:'#9aa7b5'},
+    grid:{vertLines:{color:'#1a1f26'}, horzLines:{color:'#1a1f26'}},
+    rightPriceScale:{borderColor:'#262d36'}, timeScale:{borderColor:'#262d36'}, crosshair:{mode:0}
+  });
+  const candle = chart.addCandlestickSeries({upColor:'#009E73', downColor:'#D55E00',
+    borderVisible:false, wickUpColor:'#009E73', wickDownColor:'#D55E00'});
+  candle.setData(d.candles.map(k=>({time:'20'+k.t, open:k.o, high:k.h, low:k.l, close:k.c})));
+  const ma12 = chart.addLineSeries({color:'#56B4E9', lineWidth:1, priceLineVisible:false, lastValueVisible:false});
+  const ma36 = chart.addLineSeries({color:'#E69F00', lineWidth:2, priceLineVisible:false, lastValueVisible:false});
+  ma12.setData((d.sma12||[]).map(p=>({time:'20'+p[0],value:p[1]})));
+  ma36.setData((d.sma36||[]).map(p=>({time:'20'+p[0],value:p[1]})));
+  const lv = d.levels || {};
+  const pl = (price,color,title,style)=>{ if(price==null) return;
+    candle.createPriceLine({price:price, color:color, lineWidth:1,
+      lineStyle:(style||2), axisLabelVisible:true, title:title}); };
+  (lv.resistance||[]).forEach((r,i)=>pl(r,'#009E73','R'+(i+1)));
+  (lv.support||[]).forEach((s,i)=>pl(s,'#D55E00','S'+(i+1)));
+  pl(lv.bull,'#009E73','BULL',0);
+  pl(lv.base,'#56B4E9','BASE',0);
+  pl(lv.bear,'#D55E00','BEAR',0);
+  pl(lv.invalidation,'#CC0000','⛔ INVAL',3);
+  chart.timeScale().fitContent();
+  new ResizeObserver(()=>chart.applyOptions({width:el.clientWidth})).observe(el);
+}
+const rio = new IntersectionObserver((entries,obs)=>{
+  entries.forEach(e=>{ if(e.isIntersecting){ const c=RMCHARTS.find(x=>x.el===e.target.id);
+    if(c){ mkRm(c); obs.unobserve(e.target);} } });
+}, {rootMargin:'200px'});
+RMCHARTS.forEach(c=>{ const el=document.getElementById(c.el); if(el) rio.observe(el); });
+""" % payload
 
 
 def _roadmap_block(rm, sym) -> str:
