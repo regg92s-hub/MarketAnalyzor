@@ -118,6 +118,42 @@ def build_roadmap(df: pd.DataFrame, label: str, tf: str = "weekly") -> dict | No
     def pct(target):
         return round((target / last - 1) * 100, 1) if target else None
 
+    # Chart-data: candles + MA-er for å tegne roadmapen (kompakt payload)
+    chart_weeks = 90
+    cwk = c.tail(chart_weeks)
+    sma12s = c.rolling(12).mean().tail(chart_weeks)
+    sma36s = c.rolling(36).mean().tail(chart_weeks)
+    lastv = float(cwk.iloc[-1]) if len(cwk) else 1.0
+    nd = 2 if lastv >= 10 else (4 if lastv >= 0.1 else 6)
+    candles = []
+    h_tail = high.tail(chart_weeks); l_tail = low.tail(chart_weeks)
+    o_tail = (df["open"] if "open" in df else c).tail(chart_weeks)
+    for idx in cwk.index:
+        try:
+            candles.append({"t": idx.strftime("%y-%m-%d"),
+                            "o": round(float(o_tail.loc[idx]), nd),
+                            "h": round(float(h_tail.loc[idx]), nd),
+                            "l": round(float(l_tail.loc[idx]), nd),
+                            "c": round(float(cwk.loc[idx]), nd)})
+        except Exception:
+            continue
+
+    def line_ser(s):
+        s = s.dropna()
+        return [(idx.strftime("%y-%m-%d"), round(float(v), nd)) for idx, v in s.items()]
+
+    chart = {
+        "candles": candles,
+        "sma12": line_ser(sma12s), "sma36": line_ser(sma36s),
+        "levels": {
+            "support": sup_levels[:3], "resistance": res_levels[:3],
+            "bull": bull_target, "base": base_target, "bear": bear_target,
+            "invalidation": invalidation, "measured": measured_target,
+        },
+        "first_time": candles[0]["t"] if candles else None,
+        "last_time": candles[-1]["t"] if candles else None,
+    }
+
     return {
         "label": label, "tf": tf, "last": round(last, 4),
         "trend_state": tn["state"], "cloud": ich["position"],
@@ -138,6 +174,7 @@ def build_roadmap(df: pd.DataFrame, label: str, tf: str = "weekly") -> dict | No
         },
         "measured_move": measured_target,
         "invalidation": invalidation,
+        "chart": chart,
     }
 
 
@@ -175,6 +212,7 @@ def build_all_roadmaps(raw: dict, assets_meta: dict, gld=None) -> dict:
                 if rwk is not None and len(rwk) >= 60:
                     gold_rm = build_roadmap(rwk, f"{label}/GLD", "weekly")
                     if gold_rm:
+                        gold_rm.pop("chart", None)  # spar payload — kun nominal tegnes
                         entry["gold"] = gold_rm
         out[iid] = entry
     return out
