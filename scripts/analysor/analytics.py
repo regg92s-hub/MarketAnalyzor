@@ -8,7 +8,7 @@ import pandas as pd
 from . import indicators as ind
 from .config import (ROC_HORIZONS, BEATS_ROC_HORIZONS, CYCLICAL_IDS, CYCLICAL_PAIRS,
                      ROTATION_MAIN, GENRE_TAILWIND_PCT, GENRE_DOWNTREND_PCT,
-                     ASSET_SUBCLASS, BREADTH_MA)
+                     ASSET_SUBCLASS, BREADTH_MA, PALETTE)
 
 
 def build_ranking(raw, den_id, den_label, assets_meta):
@@ -135,6 +135,42 @@ def breadth(raw, universe_ids):
         res[f"pct_over_{ma}ma"] = round(over / total * 100) if total else None
         res[f"n_{ma}ma"] = total
     return res
+
+
+def global_breadth(raw, ids):
+    """
+    Global bredde: % av land/sektor-ETF-er over 200-dagers MA (daglig).
+    Kjent regime-filter — bredt over 200d = risk-on, smalt = risk-off.
+    Returnerer også per-instrument-status for et heatmap.
+    """
+    over = total = 0
+    members = []
+    for iid in ids:
+        df = raw.get(iid)
+        if df is None or len(df) < 205:
+            continue
+        c = df["close_use"]
+        m200 = c.rolling(200).mean()
+        if pd.isna(m200.iloc[-1]):
+            continue
+        total += 1
+        is_over = bool(c.iloc[-1] > m200.iloc[-1])
+        if is_over:
+            over += 1
+        dist = round(float((c.iloc[-1] / m200.iloc[-1] - 1) * 100), 1)
+        members.append({"id": iid, "over": is_over, "dist": dist})
+    pct = round(over / total * 100) if total else None
+    members.sort(key=lambda x: -x["dist"])
+    if pct is None:
+        state, col = "Ingen data", PALETTE["neutral"]
+    elif pct >= 60:
+        state, col = "Bred risk-on", PALETTE["up"]
+    elif pct >= 40:
+        state, col = "Blandet", PALETTE["warn"]
+    else:
+        state, col = "Smal / risk-off", PALETTE["down"]
+    return {"pct_over_200d": pct, "n": total, "over": over,
+            "state": state, "col": col, "members": members}
 
 
 def cyclical_pairs(raw):
