@@ -1,416 +1,301 @@
 """
-Walk-forward / out-of-sample backtest av rotasjonsregelen.
+Konfigurasjon for market-analysor.
 
-Rapportens Stage 3 (troverdighet): en score og en rotasjonsregel er kun
-*påstander* til de er testet out-of-sample. Dette modulen tester en enkel,
-økonomisk motivert regel (lav parameterrikdom = mindre overtilpasning):
+All analyse er relativ til gull (XAU) som baseline – gull reflekterer
+likviditet, realrenter og monetær politikk (Northstar/NFTRH-metodikk).
 
-  REGEL (månedlig rebalansering):
-    - Beregn 3M+6M momentum (ROC) mot gull for hvert syklisk instrument.
-    - Absolutt-momentum-filter (Antonacci dual momentum): hold kun instrumenter
-      som også har positiv absolutt 12M-avkastning; ellers til cash/gull.
-    - Eier topp-N (relativ styrke) som passerer filteret, likevektet.
-    - Volatilitetsskalering (Daniel & Moskowitz): skaler eksponering ned i
-      høyvol-regimer for å dempe momentum-krasj.
-
-  WALK-FORWARD: ingen parameteroptimalisering på testdata. Regelen er fast og
-  økonomisk begrunnet; vi rapporterer rullende out-of-sample-avkastning og
-  sammenligner mot kjøp-og-hold SPY og gull. Look-ahead unngås ved å bruke
-  forrige måneds signaler for inneværende måneds avkastning.
-
-Dette er fortsatt IKKE en garanti for fremtidig avkastning — kun en ærlig test
-av om regelen har historisk hold.
+Endringer fra market-daily-report (v8 -> analysor):
+  - ROC/momentum-baserte relativstyrke-signaler (ikke MA-kryssing på ratio)
+  - Bredde-, risiko- og korrelasjonsmetrikker
+  - Volatilitetsjustert posisjonsstørrelse
+  - Colorblind-trygg palett (Okabe-Ito)
+  - Lightweight Charts i stedet for matplotlib-PNG-er
 """
-from __future__ import annotations
-import numpy as np
-import pandas as pd
-from . import indicators as ind
+
+VERSION = "2026-06-19-analysor-v8"
+
+# ──────────────────────────────────────────────────────────────────
+# INSTRUMENT-UNIVERS
+# Tickere valgt for lang historikk der mulig (50-perioders signaler
+# krever historikk). SOXX (2001) > SOXQ (2021); DBC (2006) > PDBC;
+# URA (2010) dekker uran. BTC/ETH bruker spot.
+# ──────────────────────────────────────────────────────────────────
+INSTRUMENT_GROUPS = [
+    {
+        "key": "renter_valuta", "title": "0. Renter & Valuta", "sector": "Renter & Valuta",
+        "instruments": [
+            {"id": "TLT", "label": "20yr Treasuries", "symbol_label": "TLT", "candidates": ["TLT"]},
+            {"id": "HYG", "label": "High Yield",      "symbol_label": "HYG", "candidates": ["HYG"]},
+            {"id": "UUP", "label": "US Dollar",       "symbol_label": "UUP", "candidates": ["UUP", "USDU"]},
+            {"id": "FXE", "label": "Euro",            "symbol_label": "FXE", "candidates": ["FXE"]},
+            {"id": "CEW", "label": "EM Valuta",       "symbol_label": "CEW", "candidates": ["CEW"]},
+        ],
+    },
+    {
+        "key": "aksjer", "title": "1. Aksjer", "sector": "Aksjer",
+        "instruments": [
+            {"id": "SPY",  "label": "S&P 500",        "symbol_label": "SPY",  "candidates": ["SPY"]},
+            {"id": "QQQ",  "label": "Nasdaq 100",     "symbol_label": "QQQ",  "candidates": ["QQQ"]},
+            {"id": "IWM",  "label": "Small Cap",      "symbol_label": "IWM",  "candidates": ["IWM"]},
+            {"id": "ACWI", "label": "Global aksjer",  "symbol_label": "ACWI", "candidates": ["ACWI"]},
+            {"id": "EXSA", "label": "Europa STOXX",   "symbol_label": "EXSA", "candidates": ["EXSA.DE", "EXSA"]},
+            {"id": "EEM",  "label": "Emerging Mkts",  "symbol_label": "EEM",  "candidates": ["EEM"]},
+            {"id": "VNQ",  "label": "Eiendom (REIT)", "symbol_label": "VNQ",  "candidates": ["VNQ"]},
+        ],
+    },
+    {
+        "key": "tech", "title": "2. Tech & Halvledere", "sector": "Tech",
+        "instruments": [
+            {"id": "SOXX", "label": "Semiconductors", "symbol_label": "SOXX", "candidates": ["SOXX", "SOXQ"]},
+            {"id": "HACK", "label": "Cybersecurity",  "symbol_label": "HACK", "candidates": ["HACK"]},
+            {"id": "BOTZ", "label": "Robotikk/AI",    "symbol_label": "BOTZ", "candidates": ["BOTZ"]},
+        ],
+    },
+    {
+        "key": "raavarer", "title": "3. Råvarer", "sector": "Rawarer",
+        "instruments": [
+            {"id": "DBC",  "label": "Commodity bred", "symbol_label": "DBC",  "candidates": ["DBC", "PDBC"]},
+            {"id": "USO",  "label": "Olje (WTI)",     "symbol_label": "USO",  "candidates": ["USO"]},
+            {"id": "UNG",  "label": "Naturgass",      "symbol_label": "UNG",  "candidates": ["UNG"]},
+            {"id": "COPX", "label": "Kobbergruver",   "symbol_label": "COPX", "candidates": ["COPX"]},
+            {"id": "XME",  "label": "Metaller/gruver","symbol_label": "XME",  "candidates": ["XME"]},
+            {"id": "XLE",  "label": "Energi-aksjer",  "symbol_label": "XLE",  "candidates": ["XLE"]},
+            {"id": "DBA",  "label": "Landbruk",       "symbol_label": "DBA",  "candidates": ["DBA"]},
+        ],
+    },
+    {
+        "key": "edelmetaller", "title": "4. Edelmetaller", "sector": "Edelmetaller",
+        "instruments": [
+            {"id": "GLD",  "label": "Gull",           "symbol_label": "GLD",  "candidates": ["GLD", "IAU"]},
+            {"id": "SLV",  "label": "Sølv",           "symbol_label": "SLV",  "candidates": ["SLV"]},
+            {"id": "GDX",  "label": "Gullgruver",     "symbol_label": "GDX",  "candidates": ["GDX"]},
+            {"id": "GDXJ", "label": "Junior gull",    "symbol_label": "GDXJ", "candidates": ["GDXJ"]},
+            {"id": "SIL",  "label": "Sølvgruver",     "symbol_label": "SIL",  "candidates": ["SIL"]},
+            {"id": "SILJ", "label": "Junior sølv",    "symbol_label": "SILJ", "candidates": ["SILJ"]},
+            {"id": "PPLT", "label": "Platina",        "symbol_label": "PPLT", "candidates": ["PPLT"]},
+            {"id": "PALL", "label": "Palladium",      "symbol_label": "PALL", "candidates": ["PALL"]},
+        ],
+    },
+    {
+        "key": "uran", "title": "5. Uranium", "sector": "Rawarer",
+        "instruments": [
+            {"id": "URA", "label": "Uranium ETF", "symbol_label": "URA", "candidates": ["URA"]},
+        ],
+    },
+    {
+        "key": "crypto", "title": "6. Crypto", "sector": "Crypto",
+        "instruments": [
+            {"id": "BTC",  "label": "Bitcoin",  "symbol_label": "BTC",  "candidates": ["BTC-USD"]},
+            {"id": "ETHA", "label": "Ethereum", "symbol_label": "ETH",  "candidates": ["ETH-USD"]},
+        ],
+    },
+    {
+        "key": "sektorer", "title": "7. SPX-sektorer", "sector": "Sektorer",
+        "instruments": [
+            {"id": "XLK", "label": "Teknologi",       "symbol_label": "XLK", "candidates": ["XLK"]},
+            {"id": "XLF", "label": "Finans",          "symbol_label": "XLF", "candidates": ["XLF"]},
+            {"id": "XLV", "label": "Helse",           "symbol_label": "XLV", "candidates": ["XLV"]},
+            {"id": "XLI", "label": "Industri",        "symbol_label": "XLI", "candidates": ["XLI"]},
+            {"id": "XLY", "label": "Forbruk syklisk", "symbol_label": "XLY", "candidates": ["XLY"]},
+            {"id": "XLP", "label": "Forbruk stabil",  "symbol_label": "XLP", "candidates": ["XLP"]},
+            {"id": "XLU", "label": "Forsyning",       "symbol_label": "XLU", "candidates": ["XLU"]},
+            {"id": "XLB", "label": "Materialer",      "symbol_label": "XLB", "candidates": ["XLB"]},
+            {"id": "XLRE","label": "Eiendom",         "symbol_label": "XLRE","candidates": ["XLRE", "IYR"]},
+            {"id": "XLC", "label": "Kommunikasjon",   "symbol_label": "XLC", "candidates": ["XLC"]},
+        ],
+    },
+    {
+        "key": "land", "title": "8. Land/regioner", "sector": "Land",
+        "instruments": [
+            {"id": "EWJ", "label": "Japan",      "symbol_label": "EWJ", "candidates": ["EWJ"]},
+            {"id": "EWG", "label": "Tyskland",   "symbol_label": "EWG", "candidates": ["EWG"]},
+            {"id": "EWU", "label": "Storbrit.",  "symbol_label": "EWU", "candidates": ["EWU"]},
+            {"id": "EWC", "label": "Canada",     "symbol_label": "EWC", "candidates": ["EWC"]},
+            {"id": "EWA", "label": "Australia",  "symbol_label": "EWA", "candidates": ["EWA"]},
+            {"id": "EWZ", "label": "Brasil",     "symbol_label": "EWZ", "candidates": ["EWZ"]},
+            {"id": "INDA","label": "India",      "symbol_label": "INDA","candidates": ["INDA", "EPI"]},
+            {"id": "FXI", "label": "Kina",       "symbol_label": "FXI", "candidates": ["FXI", "MCHI"]},
+        ],
+    },
+    {
+        "key": "renter_kreditt", "title": "9. Renter & Kreditt", "sector": "Renter & Kreditt",
+        "instruments": [
+            {"id": "IEF", "label": "7-10yr Treas", "symbol_label": "IEF", "candidates": ["IEF"]},
+            {"id": "SHY", "label": "1-3yr Treas",  "symbol_label": "SHY", "candidates": ["SHY"]},
+            {"id": "LQD", "label": "IG kreditt",   "symbol_label": "LQD", "candidates": ["LQD"]},
+            {"id": "EMB", "label": "EM obligasjon","symbol_label": "EMB", "candidates": ["EMB"]},
+            {"id": "TIP", "label": "Inflasjonssikret","symbol_label": "TIP","candidates": ["TIP"]},
+            {"id": "BIL", "label": "Statskasse 1-3m","symbol_label": "BIL","candidates": ["BIL"]},
+        ],
+    },
+    {
+        "key": "faktorer", "title": "10. Faktorer/stil", "sector": "Faktorer",
+        "instruments": [
+            {"id": "MTUM", "label": "Momentum",  "symbol_label": "MTUM", "candidates": ["MTUM"]},
+            {"id": "VLUE", "label": "Verdi",     "symbol_label": "VLUE", "candidates": ["VLUE"]},
+            {"id": "QUAL", "label": "Kvalitet",  "symbol_label": "QUAL", "candidates": ["QUAL"]},
+            {"id": "USMV", "label": "Min-vol",   "symbol_label": "USMV", "candidates": ["USMV"]},
+            {"id": "DBMF", "label": "Managed futures","symbol_label": "DBMF","candidates": ["DBMF"]},
+        ],
+    },
+]
+
+# DPM-stil aktivaklasse (underklasse-henvisning per instrument)
+ASSET_SUBCLASS = {
+    "SPY": "Stocks", "QQQ": "Stocks", "IWM": "Stocks", "ACWI": "Stocks",
+    "EXSA": "Stocks", "EEM": "Stocks", "VNQ": "Stocks",
+    "SOXX": "Tech", "HACK": "Tech", "BOTZ": "Tech",
+    "TLT": "Bonds", "HYG": "Bonds", "UUP": "Cash", "FXE": "Cash", "CEW": "Cash",
+    "GLD": "Edelmetaller", "SLV": "Edelmetaller", "GDX": "Edelmetaller", "GDXJ": "Edelmetaller",
+    "SIL": "Edelmetaller", "SILJ": "Edelmetaller", "PPLT": "Edelmetaller", "PALL": "Edelmetaller",
+    "DBC": "Commodity", "USO": "Commodity", "UNG": "Commodity", "COPX": "Commodity",
+    "XME": "Commodity", "XLE": "Commodity", "DBA": "Commodity", "URA": "Commodity",
+    "BTC": "Crypto", "ETHA": "Crypto",
+    "XLK": "Sektor", "XLF": "Sektor", "XLV": "Sektor", "XLI": "Sektor", "XLY": "Sektor",
+    "XLP": "Sektor", "XLU": "Sektor", "XLB": "Sektor", "XLRE": "Sektor", "XLC": "Sektor",
+    "EWJ": "Land", "EWG": "Land", "EWU": "Land", "EWC": "Land", "EWA": "Land",
+    "EWZ": "Land", "INDA": "Land", "FXI": "Land",
+    "IEF": "Bonds", "SHY": "Bonds", "LQD": "Bonds", "EMB": "Bonds", "TIP": "Bonds", "BIL": "Cash",
+    "MTUM": "Faktor", "VLUE": "Faktor", "QUAL": "Faktor", "USMV": "Faktor", "DBMF": "Trend",
+}
+
+# Sykliske instrumenter for leadership ranking (alt unntatt rene edelmetaller/cash)
+CYCLICAL_IDS = [
+    "SPY", "QQQ", "IWM", "ACWI", "EXSA", "EEM", "VNQ",
+    "SOXX", "HACK", "BOTZ",
+    "DBC", "USO", "UNG", "COPX", "XME", "XLE", "DBA", "URA",
+    "PALL", "BTC", "ETHA",
+    "TLT", "FXE", "UUP",
+    "XLK", "XLF", "XLV", "XLI", "XLY", "XLP", "XLU", "XLB", "XLRE", "XLC",
+    "EWJ", "EWG", "EWU", "EWC", "EWA", "EWZ", "INDA", "FXI",
+    "IEF", "LQD", "EMB", "TIP",
+    "MTUM", "VLUE", "QUAL", "USMV", "DBMF",
+]
+
+# Land + sektorer for global bredde-måler (% over 200d MA)
+BREADTH_GLOBAL_IDS = [
+    "XLK", "XLF", "XLV", "XLI", "XLY", "XLP", "XLU", "XLB", "XLRE", "XLC",
+    "EWJ", "EWG", "EWU", "EWC", "EWA", "EWZ", "INDA", "FXI", "SPY", "EEM",
+]
+
+# Hovedinstrumenter for kapitalrotasjon (store trender på tvers av klasser)
+ROTATION_MAIN = ["SPY", "EEM", "USO", "URA", "XLE", "SLV", "BTC", "NOK", "DBA", "ACWI", "VNQ"]
+
+# Sykliske par (intern rotasjon)
+CYCLICAL_PAIRS = [
+    ("XLE", "URA",  "Energi vs Uran"),
+    ("USO", "XLE",  "Olje vs Energi-aksjer"),
+    ("EEM", "SPY",  "EM vs US"),
+    ("IWM", "SPY",  "Small-cap vs Large-cap"),
+    ("SOXX", "QQQ", "Halvledere vs Nasdaq"),
+    ("COPX", "XME", "Kobber vs Metaller"),
+    ("BTC", "QQQ",  "Krypto vs Tech"),
+    ("DBA", "DBC",  "Agri vs Bred råvare"),
+    ("URA", "SPY",  "Uran vs US-aksjer"),
+]
+
+# TradingView-symbolmapping (krypto -> spot, ikke ETF)
+TV_SYMBOL_MAP = {"BTC": "BTCUSD", "ETH": "ETHUSD", "ETHA": "ETHUSD", "NOK": "USDNOK"}
+
+# Kuratert sett for korrelasjonsmatrise (hovedaktivaklasser – en 33x33 er uleselig)
+CORR_SET = ["SPY", "QQQ", "IWM", "EEM", "TLT", "HYG", "GLD", "SLV",
+            "DBC", "USO", "XLE", "URA", "BTC", "UUP"]
+
+# Instrumenter på RRG-scatter (leadership vs gull). Holdes lesbart.
+RRG_SET = ["SPY", "QQQ", "IWM", "EEM", "ACWI", "SOXX", "XLE", "USO", "DBC",
+           "COPX", "SLV", "GDX", "URA", "BTC", "TLT", "VNQ"]
+
+# ──────────────────────────────────────────────────────────────────
+# SIGNAL-PARAMETRE
+# ──────────────────────────────────────────────────────────────────
+# Relativ styrke: multi-horisont ROC (momentum) på ratio mot baseline.
+# Krever IKKE lang historikk slik 50MA-på-ratio gjør.
+ROC_HORIZONS = {"1M": 21, "3M": 63, "6M": 126, "12M": 252}  # handelsdager
+ROC_WEIGHTS = {"1M": 0.20, "3M": 0.35, "6M": 0.25, "12M": 0.20}
+
+# "Slår gull" = positiv vektet ROC mot gull på kort+mellomlang horisont.
+BEATS_ROC_HORIZONS = ["1M", "3M"]  # enten/begge positiv => slår
+
+# Sjanger i medvind hvis >= 70 % av medlemmene slår både gull og dollar
+GENRE_TAILWIND_PCT = 70.0
+GENRE_DOWNTREND_PCT = 70.0  # >=70 % taper => nedadgående
+
+# Northstar-score (0-100, høyere = lavere risiko / bedre entry)
+SCORE_TIMEFRAMES = ["weekly", "monthly", "quarterly"]
+
+# Portefølje
+CASH_THRESHOLD = 55      # min score for tildeling
+MAX_POSITIONS = 7
+OVERBOUGHT_RSI = 65
+OVERBOUGHT_MACD = 2
+STRETCH_36 = 0.20
+VOL_TARGET_ANNUAL = 0.12  # 12 % årlig vol-mål for posisjonsstørrelse
+
+# Backtest-realisme (rapportens funn)
+TX_COST_BPS = 15          # transaksjonskostnad per handlet notional (basispunkter)
+HYSTERESIS_ROC = 0.02     # ny kandidat må slå svakeste eierposisjon med 2 pp (ROC)
+HYSTERESIS_Z = 0.25       # tilsvarende margin i z-score-rom (mom+value-kombinert)
+BT_VOL_TARGET = 0.20      # kontinuerlig vol-skalering: eksponering = mål/realisert (Moreira & Muir)
+
+# Tranchet rebalansering (Newfound: "litt men ofte" — reduserer timing-flaks)
+TRANCHE_FRACTION = 0.25   # korriger 25 % av avviket mot mål per omfordeling
+
+# Value-tilt i rotasjonen (Asness 2013: value+momentum er negativt korrelert,
+# kombinasjonen demper momentum-krasj og senker turnover)
+VALUE_WEIGHT = 0.5        # vekt på value-z-score relativt til momentum-z-score
+VALUE_LOOKBACK_M = 60     # value-proxy = negativ 5-års relativ avkastning (reversal)
+
+# Panikk-regime (Daniel & Moskowitz 2016: momentum krasjer i rebound etter
+# bear-marked med høy vol). Når begge er sanne: eksponering caps på 0.5.
+PANIC_RET_LOOKBACK_M = 12
+PANIC_VOL_LOOKBACK_M = 6
+PANIC_VOL_THRESHOLD = 0.25  # >25 % annualisert SPY-vol
+PANIC_EXPOSURE_CAP = 0.5
+
+# Paper-ledger ("regelen vs deg"): hypotetisk portefølje som følger regelen
+PAPER_TOP_N = 5
+PAPER_START_NOK = 100000.0
+
+# Risikometrikker
+RISK_LOOKBACK_DAYS = 252  # 1 år for vol/Sharpe/drawdown
+RISK_FREE_ANNUAL = 0.04   # antatt risikofri rente for Sharpe
+
+# Bredde
+BREADTH_MA = [50, 200]    # % over disse MA-ene
+
+# ──────────────────────────────────────────────────────────────────
+# COLORBLIND-TRYGG PALETT (Okabe-Ito) – aldri rød/grønn alene
+# ──────────────────────────────────────────────────────────────────
+PALETTE = {
+    "up":      "#0072B2",  # blå = positivt/leder
+    "down":    "#D55E00",  # vermillion = negativt/taper
+    "neutral": "#999999",
+    "warn":    "#E69F00",  # oransje = avventende
+    "good":    "#009E73",  # bluish-green (sekundær)
+    "accent":  "#56B4E9",
+    "bg":      "#0b0d10",
+    "panel":   "#14181d",
+    "panel2":  "#1a1f26",
+    "border":  "#262d36",
+    "text":    "#e6edf3",
+    "muted":   "#9aa7b5",
+}
 
 
-def _month_end_prices(raw: dict, ids: list) -> pd.DataFrame:
-    """Månedssluttkurser for gitte instrumenter, justert og innrettet."""
-    cols = {}
-    for iid in ids:
-        df = raw.get(iid)
-        if df is None:
-            continue
-        m = df["close_use"].resample("ME").last()
-        cols[iid] = m
-    if not cols:
-        return pd.DataFrame()
-    return pd.DataFrame(cols).dropna(how="all")
+def tv_symbol(sym: str) -> str:
+    """TradingView-symbol for en ticker (krypto -> spot)."""
+    return TV_SYMBOL_MAP.get(sym, sym)
 
 
-def run_backtest(raw: dict, cyclical_ids: list, top_n: int = 5,
-                 start: str = "2012-01-01") -> dict:
-    """
-    Kjør rotasjonsbacktest. Returnerer ytelsesmål + ekvitykurver (månedlig).
-    """
-    gld = raw.get("GLD")
-    spy = raw.get("SPY")
-    if gld is None or spy is None:
-        return {"available": False, "reason": "mangler GLD/SPY"}
-
-    px = _month_end_prices(raw, cyclical_ids + ["GLD", "SPY"])
-    if px.empty or len(px) < 40:
-        return {"available": False, "reason": "for kort historikk"}
-    px = px[px.index >= pd.Timestamp(start)]
-    if len(px) < 36:
-        return {"available": False, "reason": "for få måneder etter startdato"}
-
-    rets = px.pct_change()
-    gold_m = px["GLD"]
-
-    from .config import (TX_COST_BPS, HYSTERESIS_Z, BT_VOL_TARGET,
-                         VALUE_WEIGHT, VALUE_LOOKBACK_M,
-                         PANIC_VOL_THRESHOLD, PANIC_EXPOSURE_CAP)
-    cost_rate = TX_COST_BPS / 10000.0
-
-    def _z(d: dict) -> dict:
-        v = np.array(list(d.values()), dtype=float)
-        if len(v) < 2 or np.std(v) == 0:
-            return {k: 0.0 for k in d}
-        mu, sd = float(np.mean(v)), float(np.std(v))
-        return {k: (x - mu) / sd for k, x in d.items()}
-
-    strat_curve = [1.0]
-    spy_curve = [1.0]
-    gold_curve = [1.0]
-    dates = [px.index[0].strftime("%Y-%m")]
-    n_hold_log = []
-    exposure_log = []
-    turnover_log = []
-    panic_log = []
-    prev_holds: list = []
-
-    # iterer måned for måned; signaler fra t-1, avkastning i t (ingen look-ahead)
-    for t in range(13, len(px)):
-        sig_date = px.index[t - 1]
-        # relativ styrke mot gull: 3M+6M ROC av ratioen + VALUE-TILT
-        # (Asness 2013: value = negativ langtids relativ avkastning; mom+value
-        # er negativt korrelert -> kombinasjonen demper krasj og turnover)
-        mom_s, val_s = {}, {}
-        for iid in cyclical_ids:
-            if iid not in px.columns:
-                continue
-            ratio = (px[iid] / px["GLD"]).iloc[:t]  # kun data t.o.m. t-1
-            r = ratio.dropna()
-            if len(r) < 7:
-                continue
-            roc3 = (r.iloc[-1] / r.iloc[-4] - 1) if len(r) >= 4 else None
-            roc6 = (r.iloc[-1] / r.iloc[-7] - 1) if len(r) >= 7 else None
-            if roc3 is None or roc6 is None:
-                continue
-            rel = (roc3 + roc6) / 2
-            # absolutt-momentum-filter: 12M absolutt avkastning > 0
-            abs_series = px[iid].iloc[:t].dropna()
-            abs12 = (abs_series.iloc[-1] / abs_series.iloc[-13] - 1) if len(abs_series) >= 13 else None
-            if abs12 is None or abs12 <= 0:
-                continue  # feiler filter -> ikke eid (til cash)
-            if rel <= 0:
-                continue
-            mom_s[iid] = rel
-            lb = min(VALUE_LOOKBACK_M, len(r) - 1)
-            val_s[iid] = (-(r.iloc[-1] / r.iloc[-1 - lb] - 1)) if lb >= 24 else 0.0
-        mz, vz = _z(mom_s), _z(val_s)
-        scores = {k: mz[k] + VALUE_WEIGHT * vz.get(k, 0.0) for k in mom_s}
-
-        # Utvalg med HYSTERESE: eierposisjoner beholdes så lenge de fortsatt
-        # kvalifiserer; en utfordrer må slå svakeste eier med margin. Dette
-        # senker turnover og gjør live-resultat likere backtest.
-        incumbents = sorted([h for h in prev_holds if h in scores],
-                            key=lambda k: -scores[k])
-        challengers = sorted([k for k in scores if k not in incumbents],
-                             key=lambda k: -scores[k])
-        holds = incumbents[:top_n]
-        for cand in challengers:
-            if len(holds) < top_n:
-                holds.append(cand)
-                continue
-            weakest = min(holds, key=lambda k: scores[k])
-            if scores[cand] > scores[weakest] + HYSTERESIS_Z:
-                holds.remove(weakest)
-                holds.append(cand)
-        n_hold_log.append(len(holds))
-
-        # Kontinuerlig volatilitetsskalering (Moreira & Muir): eksponering =
-        # vol-mål / realisert vol, klippet til [0.3, 1.0]. Erstatter trappetrinn.
-        exposure = 1.0
-        try:
-            basket = holds if holds else ["GLD"]
-            recent = rets[basket].iloc[t - 6:t].mean(axis=1).dropna()
-            if len(recent) >= 4:
-                rvol = float(recent.std() * np.sqrt(12))
-                if rvol > 0:
-                    exposure = float(np.clip(BT_VOL_TARGET / rvol, 0.3, 1.0))
-        except Exception:
-            pass
-        # PANIKK-DEMPER (Daniel & Moskowitz 2016): SPY 12m < 0 OG høy vol ->
-        # cap eksponering. Krasjene kommer i rebound etter bear-marked.
-        panic = False
-        try:
-            spy12 = float(px["SPY"].iloc[t - 1] / px["SPY"].iloc[t - 13] - 1)
-            spyv = float(rets["SPY"].iloc[t - 6:t].std() * np.sqrt(12))
-            panic = (spy12 < 0) and (spyv > PANIC_VOL_THRESHOLD)
-            if panic:
-                exposure = min(exposure, PANIC_EXPOSURE_CAP)
-        except Exception:
-            pass
-        panic_log.append(panic)
-        exposure_log.append(exposure)
-
-        # Transaksjonskostnader: kostnad på handlet notional (likevekts-vekter).
-        w_prev = {h: 1.0 / len(prev_holds) for h in prev_holds} if prev_holds else {}
-        w_new = {h: 1.0 / len(holds) for h in holds} if holds else {}
-        all_ids = set(w_prev) | set(w_new)
-        turnover = sum(abs(w_new.get(i, 0.0) - w_prev.get(i, 0.0)) for i in all_ids)
-        turnover_log.append(turnover)
-        cost = turnover * cost_rate
-
-        # månedens avkastning
-        if holds:
-            port_ret = float(rets[holds].iloc[t].mean())
-        else:
-            port_ret = float(rets["GLD"].iloc[t])  # ingen leder -> gull
-        port_ret = port_ret * exposure - cost  # resten i cash (0 % antatt)
-        prev_holds = holds
-
-        strat_curve.append(strat_curve[-1] * (1 + (port_ret if np.isfinite(port_ret) else 0)))
-        spy_curve.append(spy_curve[-1] * (1 + (float(rets["SPY"].iloc[t]) if np.isfinite(rets["SPY"].iloc[t]) else 0)))
-        gold_curve.append(gold_curve[-1] * (1 + (float(rets["GLD"].iloc[t]) if np.isfinite(rets["GLD"].iloc[t]) else 0)))
-        dates.append(px.index[t].strftime("%Y-%m"))
-
-    def stats(curve):
-        c = pd.Series(curve)
-        months = len(c) - 1
-        if months < 12:
-            return {}
-        total = c.iloc[-1] / c.iloc[0] - 1
-        cagr = (c.iloc[-1] / c.iloc[0]) ** (12 / months) - 1
-        mret = c.pct_change().dropna()
-        vol = mret.std() * np.sqrt(12)
-        sharpe = (mret.mean() * 12 - 0.04) / vol if vol > 0 else None
-        roll_max = c.cummax()
-        maxdd = float((c / roll_max - 1).min())
-        return {
-            "total_return": round(total * 100, 1),
-            "cagr": round(cagr * 100, 1),
-            "vol": round(float(vol) * 100, 1),
-            "sharpe": round(float(sharpe), 2) if sharpe is not None else None,
-            "max_dd": round(maxdd * 100, 1),
-        }
-
-    return {
-        "available": True,
-        "start": dates[0], "end": dates[-1], "months": len(dates),
-        "top_n": top_n,
-        "avg_holdings": round(float(np.mean(n_hold_log)), 1) if n_hold_log else 0,
-        "tx_cost_bps": TX_COST_BPS,
-        "hysteresis_z": HYSTERESIS_Z,
-        "avg_exposure": round(float(np.mean(exposure_log)), 2) if exposure_log else 1.0,
-        "annual_turnover": round(float(np.mean(turnover_log)) * 12 * 100) if turnover_log else 0,
-        "value_weight": VALUE_WEIGHT,
-        "panic_months": int(sum(panic_log)),
-        "dates": dates,
-        "strategy": {"curve": [round(v, 4) for v in strat_curve], **stats(strat_curve)},
-        "spy": {"curve": [round(v, 4) for v in spy_curve], **stats(spy_curve)},
-        "gold": {"curve": [round(v, 4) for v in gold_curve], **stats(gold_curve)},
-    }
-
-
-def run_recommendation_backtest(raw: dict, cyclical_ids: list,
-                                score_threshold: int = 60) -> dict:
-    """
-    ANBEFALINGS-BACKTEST: "hva om alle app-ens kjøps/salgs-anbefalinger var fulgt?"
-
-    Skiller seg fra rotasjons-backtesten over: i stedet for ren momentum-rangering
-    rekonstruerer denne NSBC-score (lavrisiko-entry) PUNKT-FOR-PUNKT historisk og
-    eier instrumenter som var i konstruktiv tilstand (score >= terskel), likevektet.
-
-    Streng metodikk (unngår look-ahead):
-      - Score beregnes KUN på data t.o.m. måned t-1 (.iloc[:t]).
-      - Signal på månedsslutt t-1 -> kjøp på pris t (neste bar).
-      - 15bps transaksjonskostnad. Hysterese via terskel-bånd.
-      - Tre kurver: anbefalingssystem vs kjøp-og-hold SPY vs gull.
-
-    Røkt-flagg: hvis Sharpe>1.5 eller CAGR>15% på en slik rekonstruksjon, mistenk
-    residual look-ahead. Dette er en SIMULERING av mekanisk fulgte signaler, ikke
-    en logg over faktisk gjennomførte handler.
-    """
-    from .config import TX_COST_BPS
-    cost_rate = TX_COST_BPS / 10000.0
-
-    gld = raw.get("GLD")
-    spy = raw.get("SPY")
-    if gld is None or spy is None:
-        return {"available": False, "reason": "mangler GLD/SPY"}
-
-    # Månedlige prisserier
-    monthly = {}
-    for iid in cyclical_ids:
-        df = raw.get(iid)
-        if df is None:
-            continue
-        m = df["close_use"].resample("ME").last().dropna()
-        if len(m) > 48:
-            monthly[iid] = m
-    if len(monthly) < 5:
-        return {"available": False, "reason": "for få instrumenter med historikk"}
-
-    spy_m = spy["close_use"].resample("ME").last().dropna()
-    gold_m = gld["close_use"].resample("ME").last().dropna()
-
-    # ── YTELSE: precompute månedlig NSBC-lignende score-serie PER instrument ÉN gang.
-    # I stedet for å re-resample + re-score hver måned (O(måneder×instrumenter×rescore)),
-    # beregner vi rullende ukentlige indikatorer vektorisert og leser av månedlig.
-    # Dette er en tro proxy på nsbc_score: over 12&36-ukers SMA + over Ichimoku-sky
-    # + ikke stretched (dist36<10%) + StochRSI-ish momentum, klippet til 0-100.
-    def monthly_score_series(df: pd.DataFrame) -> pd.Series:
-        c = df["close_use"].dropna()
-        if len(c) < 260:
-            return pd.Series(dtype=float)
-        high = df["high"] if "high" in df else c
-        low = df["low"] if "low" in df else c
-        # Ukentlig sampling
-        wc = c.resample("W-FRI").last().dropna()
-        wh = high.resample("W-FRI").max().reindex(wc.index)
-        wl = low.resample("W-FRI").min().reindex(wc.index)
-        if len(wc) < 60:
-            return pd.Series(dtype=float)
-        sma12 = wc.rolling(12).mean()
-        sma36 = wc.rolling(36).mean()
-        # Ichimoku 9/26/52
-        conv = (wh.rolling(9).max() + wl.rolling(9).min()) / 2
-        base = (wh.rolling(26).max() + wl.rolling(26).min()) / 2
-        span_a = ((conv + base) / 2).shift(26)
-        span_b = ((wh.rolling(52).max() + wl.rolling(52).min()) / 2).shift(26)
-        cloud_top = pd.concat([span_a, span_b], axis=1).max(axis=1)
-        cloud_bot = pd.concat([span_a, span_b], axis=1).min(axis=1)
-        dist36 = (wc - sma36) / sma36 * 100
-        # Vektorisert evidens-telling -> 0-100
-        above_both = (wc > sma12) & (wc > sma36)
-        s_over_l = sma12 > sma36
-        above_cloud = wc > cloud_top
-        below_cloud = wc < cloud_bot
-        mom_up = dist36 > 0
-        stretched = dist36 >= 10
-        ticks = (above_both.astype(int) + above_cloud.astype(int)
-                 + s_over_l.astype(int) + mom_up.astype(int))
-        score = (ticks / 4.0 * 100).clip(0, 100)
-        # Stretched straff + fallende-kniv-vakt (samme ånd som entry_quality)
-        score = score.where(~stretched, score.clip(upper=45))
-        score = score.where(~below_cloud, score.clip(upper=30))
-        # Månedlig avlesning (siste ukentlige verdi i hver måned)
-        return score.resample("ME").last()
-
-    score_series = {}
-    for iid, df in [(i, raw[i]) for i in monthly]:
-        ss = monthly_score_series(df)
-        if not ss.empty:
-            score_series[iid] = ss
-
-    # Felles datoindeks (start når nok historikk finnes for score)
-    all_idx = sorted(set().union(*[set(m.index) for m in monthly.values()]))
-    start_i = 40
-    if len(all_idx) < start_i + 12:
-        return {"available": False, "reason": "for kort historikk"}
-    dates_idx = all_idx[start_i:]
-
-    sys_curve = [1.0]
-    spy_curve = [1.0]
-    gold_curve = [1.0]
-    out_dates = [dates_idx[0].strftime("%Y-%m")]
-    prev_holds = set()
-    n_hold_log = []
-
-    for t in range(1, len(dates_idx)):
-        d_prev = dates_idx[t - 1]
-        d_now = dates_idx[t]
-        # Anbefalt eid: score (t.o.m. d_prev) >= terskel OG slår gull 3M
-        holds = []
-        for iid in score_series:
-            ss = score_series[iid]
-            past = ss[ss.index <= d_prev]
-            if len(past) < 1:
-                continue
-            score = float(past.iloc[-1])
-            if score >= score_threshold:
-                rm = monthly[iid]
-                rp = rm[rm.index <= d_prev]
-                gp = gold_m[gold_m.index <= d_prev]
-                if len(rp) >= 4 and len(gp) >= 4:
-                    ratio_now = rp.iloc[-1] / gp.iloc[-1]
-                    ratio_3m = rp.iloc[-4] / gp.iloc[-4]
-                    if ratio_now > ratio_3m:
-                        holds.append(iid)
-        n_hold_log.append(len(holds))
-
-        # Avkastning fra d_prev til d_now (neste-bar-utførelse)
-        if holds:
-            rets = []
-            for iid in holds:
-                m = monthly[iid]
-                try:
-                    p0 = float(m[m.index <= d_prev].iloc[-1])
-                    p1 = float(m[m.index <= d_now].iloc[-1])
-                    if p0 > 0:
-                        rets.append(p1 / p0 - 1)
-                except Exception:
-                    continue
-            port_ret = float(np.mean(rets)) if rets else 0.0
-        else:
-            port_ret = 0.0  # alt i cash
-
-        # Transaksjonskostnad ved endring i posisjoner
-        turnover = len(set(holds) ^ prev_holds) / max(len(holds) + len(prev_holds), 1)
-        port_ret -= turnover * cost_rate
-        prev_holds = set(holds)
-
-        sys_curve.append(sys_curve[-1] * (1 + port_ret))
-        # Benchmarks
-        try:
-            s0 = float(spy_m[spy_m.index <= d_prev].iloc[-1])
-            s1 = float(spy_m[spy_m.index <= d_now].iloc[-1])
-            spy_curve.append(spy_curve[-1] * (s1 / s0))
-        except Exception:
-            spy_curve.append(spy_curve[-1])
-        try:
-            g0 = float(gold_m[gold_m.index <= d_prev].iloc[-1])
-            g1 = float(gold_m[gold_m.index <= d_now].iloc[-1])
-            gold_curve.append(gold_curve[-1] * (g1 / g0))
-        except Exception:
-            gold_curve.append(gold_curve[-1])
-        out_dates.append(d_now.strftime("%Y-%m"))
-
-    def stats(curve):
-        if len(curve) < 13:
-            return {"cagr": None, "vol": None, "sharpe": None, "max_dd": None}
-        arr = np.array(curve)
-        yrs = len(arr) / 12.0
-        cagr = (arr[-1] / arr[0]) ** (1 / yrs) - 1 if arr[0] > 0 and yrs > 0 else None
-        rets = np.diff(arr) / arr[:-1]
-        vol = float(np.std(rets) * np.sqrt(12)) if len(rets) > 1 else None
-        sharpe = (float(np.mean(rets) * 12) / vol) if vol and vol > 0 else None
-        peak = np.maximum.accumulate(arr)
-        max_dd = float(((arr - peak) / peak).min())
-        return {"cagr": round(cagr * 100, 1) if cagr is not None else None,
-                "vol": round(vol * 100, 1) if vol is not None else None,
-                "sharpe": round(sharpe, 2) if sharpe is not None else None,
-                "max_dd": round(max_dd * 100, 1)}
-
-    s_sys = stats(sys_curve)
-    # Røkt-flagg
-    suspicious = (s_sys.get("sharpe") or 0) > 1.5 or (s_sys.get("cagr") or 0) > 15
-
-    return {
-        "available": True,
-        "start": out_dates[0], "end": out_dates[-1], "months": len(out_dates),
-        "score_threshold": score_threshold,
-        "avg_holdings": round(float(np.mean(n_hold_log)), 1) if n_hold_log else 0,
-        "tx_cost_bps": TX_COST_BPS,
-        "dates": out_dates,
-        "system": {"curve": [round(v, 4) for v in sys_curve], **s_sys},
-        "spy": {"curve": [round(v, 4) for v in spy_curve], **stats(spy_curve)},
-        "gold": {"curve": [round(v, 4) for v in gold_curve], **stats(gold_curve)},
-        "suspicious_lookahead": suspicious,
-    }
+def all_instruments():
+    """Flat liste av alle instrument-dicts med sektor og subclass påført."""
+    out = []
+    for g in INSTRUMENT_GROUPS:
+        for inst in g["instruments"]:
+            d = dict(inst)
+            d["sector"] = g["sector"]
+            d["category_key"] = g["key"]
+            d["category_title"] = g["title"]
+            d["subclass"] = ASSET_SUBCLASS.get(inst["id"], "")
+            out.append(d)
+    return out
