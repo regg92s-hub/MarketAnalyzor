@@ -29,11 +29,12 @@ CSP = (
 
 NAV = """
 <nav class="nav">
-  <a href="index.html" class="{a0}">📈 Trend-oversikt</a>
-  <a href="report.html" class="{a1}">📊 Daily Report</a>
-  <a href="roadmap.html" class="{a2}">🗺️ Roadmaps</a>
-  <a href="portfolio.html" class="{a3}">💼 Portefølje</a>
-  <a href="backtest.html" class="{a4}">🧪 Backtest</a>
+  <a href="index.html" class="{a0}">🎯 I dag</a>
+  <a href="trend.html" class="{a1}">📈 Trend-oversikt</a>
+  <a href="report.html" class="{a2}">📊 Daily Report</a>
+  <a href="roadmap.html" class="{a3}">🗺️ Roadmaps</a>
+  <a href="portfolio.html" class="{a4}">💼 Portefølje</a>
+  <a href="backtest.html" class="{a5}">🧪 Backtest</a>
 </nav>
 """
 
@@ -64,6 +65,15 @@ h3 {{ font-size:14px; margin:0; }}
   background:var(--panel2); border-left:2px solid var(--accent); border-radius:4px; }}
 .explain .ex-what {{ color:var(--text); }}
 .explain .ex-do {{ color:var(--muted); }}
+.today-cols {{ display:grid; grid-template-columns:repeat(3,1fr); gap:14px; }}
+@media (max-width:760px) {{ .today-cols {{ grid-template-columns:1fr; }} }}
+.today-col {{ background:var(--panel2); border-radius:8px; padding:10px 12px; }}
+.today-item {{ padding:5px 0; border-bottom:1px solid var(--border); }}
+.today-item:last-child {{ border-bottom:none; }}
+table.lb {{ font-size:13px; }}
+table.lb th {{ position:sticky; top:0; background:var(--panel); white-space:nowrap; }}
+table.lb td {{ white-space:nowrap; }}
+.sort-ar {{ color:var(--accent); font-size:10px; }}
 .section {{ background:var(--panel); border:1px solid var(--border); border-radius:14px;
   padding:16px; margin:14px 0; }}
 .grid {{ display:grid; gap:12px; }}
@@ -111,9 +121,9 @@ footer {{ color:var(--muted); font-size:12px; margin:20px 0; }}
 
 
 def head(title: str, active: int) -> str:
-    cls = ["", "", "", "", ""]
+    cls = ["", "", "", "", "", ""]
     cls[active] = "active"
-    nav = NAV.format(a0=cls[0], a1=cls[1], a2=cls[2], a3=cls[3], a4=cls[4])
+    nav = NAV.format(a0=cls[0], a1=cls[1], a2=cls[2], a3=cls[3], a4=cls[4], a5=cls[5])
     return f"""<!doctype html>
 <html lang="no">
 <head>
