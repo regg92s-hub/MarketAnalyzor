@@ -35,8 +35,156 @@ def _roc_cell(v):
 
 
 # ── Trend-oversikt ────────────────────────────────────────────────
+def render_today(data) -> str:
+    """🎯 I dag — landingssiden. Tre lag: kommando-bånd (én skjerm),
+    sorterbar leaderboard, og lenker til detaljer."""
+    P = layout.head("I dag", 0)
+    td = data.get("today", {})
+    out = [P, '<h1>🎯 I dag</h1>']
+
+    # ── LAG 1: Kommando-bånd ──────────────────────────────────────
+    macro_state = td.get("macro_state", "ukjent")
+    macro_score = td.get("macro_score")
+    mcol = (PALETTE["up"] if macro_state == "risk-on"
+            else PALETTE["down"] if macro_state == "risk-off" else PALETTE["warn"])
+    out.append('<section class="section" style="border:2px solid var(--accent)">')
+    out.append(f'<div style="font-size:16px;font-weight:700;margin-bottom:4px">'
+               f'Makro: <span style="color:{mcol}">{html.escape(macro_state)}'
+               f'{f" ({macro_score}/100)" if macro_score is not None else ""}</span></div>')
+    out.append(f'<p style="font-size:14px;line-height:1.5;margin:0 0 12px">{html.escape(td.get("verdict",""))}</p>')
+
+    # Tre kolonner: kjøp / skaler av / dine posisjoner
+    out.append('<div class="today-cols">')
+
+    # Kjøp-kandidater
+    buys = td.get("buys", [])
+    out.append(f'<div class="today-col"><h3 style="color:{PALETTE["up"]};margin-top:0">▲ Kjøp-kandidater</h3>')
+    if buys:
+        for b in buys:
+            out.append(f'<div class="today-item"><a href="report.html#{b["id"]}" style="font-weight:700;color:var(--text);text-decoration:none">{html.escape(b["sym"])}</a> '
+                       f'<span class="pill" style="background:{PALETTE["up"]}22;color:{PALETTE["up"]}">{b["score"]}</span>'
+                       f'<div class="muted" style="font-size:11px">{html.escape(b.get("why",""))} · {html.escape(b.get("sector",""))}</div></div>')
+    else:
+        out.append('<p class="muted" style="font-size:12px">Ingen kvalifiserte i lavrisiko-entry nå. Tålmodighet.</p>')
+    out.append('</div>')
+
+    # Skaler av / unngå
+    avoids = td.get("avoids", [])
+    out.append(f'<div class="today-col"><h3 style="color:{PALETTE["down"]};margin-top:0">▼ Skaler av / unngå</h3>')
+    if avoids:
+        for av in avoids:
+            ac = PALETTE["warn"] if av.get("stage") == 2 else PALETTE["down"]
+            out.append(f'<div class="today-item"><a href="report.html#{av["id"]}" style="font-weight:700;color:var(--text);text-decoration:none">{html.escape(av["sym"])}</a> '
+                       f'<div class="muted" style="font-size:11px;color:{ac}">{html.escape(av.get("reason",""))}</div></div>')
+    else:
+        out.append('<p class="muted" style="font-size:12px">Ingen stretched/nedtrend-varsler nå.</p>')
+    out.append('</div>')
+
+    # Dine posisjoner
+    uv = data.get("user_portfolio")
+    out.append(f'<div class="today-col"><h3 style="margin-top:0">💼 Dine posisjoner</h3>')
+    if uv and uv.get("rows"):
+        actions = [r for r in uv["rows"] if r["verdict"] in ("SKALER AV", "VURDER SKALER AV")]
+        if actions:
+            for r in actions:
+                rc = PALETTE["down"] if r["verdict"] == "SKALER AV" else PALETTE["warn"]
+                out.append(f'<div class="today-item"><span style="font-weight:700">{html.escape(r["sym"])}</span> '
+                           f'<span style="color:{rc};font-size:11px">{html.escape(r["verdict"])}</span>'
+                           f'<div class="muted" style="font-size:11px">{html.escape(r.get("why",""))} · {r["pnl_pct"]:+.1f}%</div></div>')
+        else:
+            out.append(f'<p class="muted" style="font-size:12px">Ingen posisjoner krever handling. '
+                       f'Total {uv.get("total_nok",0):,.0f} kr.</p>')
+    else:
+        out.append('<p class="muted" style="font-size:12px">Synk porteføljen din for å se posisjons-varsler her.</p>')
+    out.append('</div>')
+
+    out.append('</div></section>')
+
+    # ── LAG 2: Sorterbar leaderboard ──────────────────────────────
+    lb = td.get("leaderboard", [])
+    out.append('<section class="section"><h2>📊 Leaderboard — hele universet</h2>'
+               '<p class="sub">Klikk en kolonne for å sortere. <strong>Kompositt</strong> = '
+               'NSBC-score × sjanger-medvind × makro (vekt-av-bevis): et instrument flyter til '
+               'toppen bare når oppsett, sjanger OG makro peker samme vei. '
+               'Grønn = sterk, rød = svak. Klikk symbol for detaljer.</p>')
+    out.append(_leaderboard_table(lb))
+    out.append('</section>')
+
+    out.append('<p class="sub" style="margin-top:16px">Mer detaljer: '
+               '<a href="trend.html">Trend-oversikt</a> · '
+               '<a href="report.html">Daily Report</a> · '
+               '<a href="roadmap.html">Roadmaps</a></p>')
+    out.append(layout.foot())
+    return "".join(out)
+
+
+def _leaderboard_table(lb) -> str:
+    """Sorterbar HTML-tabell. Sortering gjøres klientside i JS."""
+    if not lb:
+        return '<p class="muted">Ingen data.</p>'
+    import json as _json
+    head_cols = [
+        ("composite", "Kompositt"), ("sym", "Symbol"), ("score", "Score"),
+        ("stage", "Stage"), ("trend", "LT/KT"), ("beats", "Slår gull"),
+        ("mansfield", "Mansfield"), ("roc3m", "3M %"), ("dist36", "Fra 36-MA"),
+        ("sector", "Sjanger"),
+    ]
+    th = "".join(f'<th data-k="{k}" style="cursor:pointer;user-select:none">{lbl} <span class="sort-ar"></span></th>'
+                 for k, lbl in head_cols)
+    return (f'<div style="overflow-x:auto"><table id="lbTable" class="lb"><thead><tr>{th}</tr></thead>'
+            f'<tbody></tbody></table></div>'
+            f'<script>const LB={_json.dumps(lb)};{_leaderboard_js()}</script>')
+
+
+def _leaderboard_js() -> str:
+    return r"""
+(function(){
+  let sortK='composite', sortDir=-1;
+  const tb=document.querySelector('#lbTable tbody');
+  const upC='#009E73',downC='#D55E00',warnC='#E69F00',mutC='#7d8a99';
+  function scoreColor(s){ if(s>=70)return upC; if(s>=55)return '#56B4E9'; if(s>=40)return warnC; return downC; }
+  function stageLabel(st){ return {1:'1 Basing',2:'2 Opptrend',3:'3 Distrib.',4:'4 Nedtrend'}[st]||'–'; }
+  function stageColor(st){ return {1:'#56B4E9',2:upC,3:warnC,4:downC}[st]||mutC; }
+  function spark(arr){ if(!arr||arr.length<2)return ''; const w=60,h=18,mn=Math.min(...arr),mx=Math.max(...arr);
+    const rng=(mx-mn)||1; const pts=arr.map((v,i)=>`${(i/(arr.length-1)*w).toFixed(1)},${(h-(v-mn)/rng*h).toFixed(1)}`).join(' ');
+    const up=arr[arr.length-1]>=arr[0]; return `<svg width="${w}" height="${h}" style="vertical-align:middle"><polyline points="${pts}" fill="none" stroke="${up?upC:downC}" stroke-width="1.3"/></svg>`; }
+  function cell(v,c){ return `<td style="${c||''}">${v}</td>`; }
+  function render(){
+    const rows=[...LB].sort((a,b)=>{ let x=a[sortK],y=b[sortK];
+      if(sortK==='sym'||sortK==='sector'){ x=(x||'');y=(y||''); return sortDir*x.localeCompare(y); }
+      if(sortK==='trend'){ x=(a.lt||'')+(a.kt||'');y=(b.lt||'')+(b.kt||''); return sortDir*x.localeCompare(y); }
+      if(sortK==='beats'){ x=a.beats_gold?1:0;y=b.beats_gold?1:0; }
+      x=(x==null?-9999:x); y=(y==null?-9999:y); return sortDir*(x-y); });
+    tb.innerHTML=rows.map(r=>{
+      const tr=v=>v==null?'<span style="color:'+mutC+'">–</span>':v;
+      const sb=v=>({'bull':'<span style="color:'+upC+'">bull</span>','bear':'<span style="color:'+downC+'">bear</span>'}[v]||'<span style="color:'+mutC+'">nøy</span>');
+      const beats=r.beats_gold==null?tr(null):(r.beats_gold?'<span style="color:'+upC+'">▲ ja</span>':'<span style="color:'+downC+'">▼ nei</span>');
+      const mans=r.mansfield==null?tr(null):`<span style="color:${r.mansfield>0?upC:downC}">${r.mansfield>0?'+':''}${r.mansfield}</span>`;
+      const roc=r.roc3m==null?tr(null):`<span style="color:${r.roc3m>=0?upC:downC}">${r.roc3m>=0?'+':''}${r.roc3m.toFixed(1)}%</span>`;
+      const dist=r.dist36==null?tr(null):`<span style="color:${r.dist36>=10?warnC:(r.dist36>=0?upC:downC)}">${r.dist36>=0?'+':''}${r.dist36.toFixed(1)}%</span>`;
+      return `<tr>
+        <td style="font-weight:700;color:${scoreColor(r.composite)}">${r.composite} ${spark(r.spark)}</td>
+        <td><a href="report.html#${r.id}" style="color:var(--text);font-weight:600;text-decoration:none">${r.sym}</a></td>
+        <td style="color:${scoreColor(r.score)};font-weight:600">${r.score}</td>
+        <td style="color:${stageColor(r.stage)};font-size:12px">${stageLabel(r.stage)}</td>
+        <td style="font-size:11px">${sb(r.lt)}/${sb(r.kt)}</td>
+        ${cell(beats)}${cell(mans)}${cell(roc)}${cell(dist)}
+        <td class="muted" style="font-size:11px">${r.sector||''}</td></tr>`;
+    }).join('');
+    document.querySelectorAll('#lbTable th').forEach(th=>{
+      const ar=th.querySelector('.sort-ar'); if(ar) ar.textContent = th.dataset.k===sortK?(sortDir<0?'▼':'▲'):''; });
+  }
+  document.querySelectorAll('#lbTable th').forEach(th=>{
+    th.addEventListener('click',()=>{ const k=th.dataset.k;
+      if(k===sortK) sortDir*=-1; else { sortK=k; sortDir=(k==='sym'||k==='sector')?1:-1; }
+      render(); }); });
+  render();
+})();
+"""
+
+
 def render_trend(data) -> str:
-    P = layout.head("Trend-oversikt", 0)
+    P = layout.head("Trend-oversikt", 1)
     out = [P, '<h1>📈 Trend-oversikt</h1>',
            '<p class="sub">All analyse er relativ til gull (XAU) som baseline. '
            'Relativ styrke måles med <strong>ROC/momentum</strong> på ratioen, ikke MA-kryssing — '
@@ -524,7 +672,7 @@ def _dist_display(a) -> str:
 
 
 def render_report(data) -> str:
-    P = layout.head("Market Daily Report", 1)
+    P = layout.head("Market Daily Report", 2)
     out = [P, '<h1 id="top">📊 Market Daily Report</h1>',
            '<p class="sub">NSBC-score 0–100 (høyere = ekte lavrisiko-entry slik Northstar '
            'definerer det: <strong>ikke stretched fra 36-MA + nettopp brutt ut av base + over trend</strong>). '
@@ -810,7 +958,7 @@ def _corr_section(corr) -> str:
 
 # ── Backtest-side ─────────────────────────────────────────────────
 def render_backtest(data) -> str:
-    P = layout.head("Backtest", 4)
+    P = layout.head("Backtest", 5)
     bt = data.get("backtest", {})
     out = [P, '<h1>🧪 Backtest — walk-forward</h1>',
            '<p class="sub">Ærlig out-of-sample-test av en enkel, økonomisk motivert rotasjonsregel: '
@@ -971,7 +1119,7 @@ if(window.LightweightCharts) initBt(); else window.addEventListener('load', init
 
 # ── Roadmap-side (NSBC-stil auto-roadmaps) ────────────────────────
 def render_roadmap(data) -> str:
-    P = layout.head("Roadmaps", 2)
+    P = layout.head("Roadmaps", 3)
     roadmaps = data.get("roadmaps", {})
     assets = data.get("assets", {})
     out = [P, '<h1>🗺️ Roadmaps</h1>',
