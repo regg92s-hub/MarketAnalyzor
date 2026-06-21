@@ -1,5 +1,5 @@
 const CACHE = 'analysor-v5';
-const CORE = ['./','./index.html','./report.html','./roadmap.html','./portfolio.html','./backtest.html',
+const CORE = ['./','./index.html','./trend.html','./report.html','./roadmap.html','./portfolio.html','./backtest.html',
   './lightweight-charts.standalone.production.js','./manifest.webmanifest'];
 self.addEventListener('install', e => {
   e.waitUntil(caches.open(CACHE).then(c => c.addAll(CORE)).then(()=>self.skipWaiting()));
