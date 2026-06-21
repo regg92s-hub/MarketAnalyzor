@@ -38,7 +38,7 @@ def _json_default(o):
         return o.tolist()
     raise TypeError(f"Object of type {o.__class__.__name__} is not JSON serializable")
 
-from analysor import config, data as datamod, scoring, analytics, regime as regimemod, render, portfolio, backtest as backtestmod, benchmarks as benchmarksmod, paper, roadmap as roadmapmod, validation as validationmod  # noqa: E402
+from analysor import config, data as datamod, scoring, analytics, regime as regimemod, render, portfolio, backtest as backtestmod, benchmarks as benchmarksmod, paper, roadmap as roadmapmod, validation as validationmod, today as todaymod  # noqa: E402
 from analysor.config import VERSION, PALETTE  # noqa: E402
 from analysor.layout import LWC_CDN, LWC_LOCAL  # noqa: E402
 from analysor import indicators as ind  # noqa: E402
@@ -184,7 +184,10 @@ def main():
         if gld is not None and iid != "GLD":
             b = ind.beats_baseline(df["close_use"], gld["close_use"],
                                    config.BEATS_ROC_HORIZONS, config.ROC_HORIZONS)
-            a["gold_beat"] = {"beats": b["beats"], "tf_over": b["tf_over"]} if b["beats"] is not None else None
+            a["gold_beat"] = ({"beats": b["beats"], "tf_over": b["tf_over"],
+                               "mansfield": b.get("mansfield"),
+                               "roc3m": (b.get("roc") or {}).get("3M")}
+                              if b["beats"] is not None else None)
         else:
             a["gold_beat"] = None
         assets[iid] = a
@@ -299,9 +302,12 @@ def main():
         json.dump(ledger, f, separators=(",", ":"), default=_json_default)
 
     # 5. Samlet datamodell
+    today_data = todaymod.build_today(assets, genres, reg, sector_summary,
+                                      user_portfolio=user_val, roadmaps=roadmaps)
     model = {
         "version": VERSION,
         "generated_local": NOW.isoformat(),
+        "today": today_data,
         "assets": assets,
         "sector_summary": sector_summary,
         "ranking_gold": ranking_gold,
@@ -375,7 +381,8 @@ def main():
     log(f"index.json skrevet ({(DOCS/'index.json').stat().st_size} bytes)")
 
     # 7. HTML-sider
-    (DOCS / "index.html").write_text(render.render_trend(model), encoding="utf-8")
+    (DOCS / "index.html").write_text(render.render_today(model), encoding="utf-8")
+    (DOCS / "trend.html").write_text(render.render_trend(model), encoding="utf-8")
     (DOCS / "report.html").write_text(render.render_report(model), encoding="utf-8")
     (DOCS / "roadmap.html").write_text(render.render_roadmap(model), encoding="utf-8")
     (DOCS / "portfolio.html").write_text(portfolio.render_portfolio(model), encoding="utf-8")
@@ -636,7 +643,7 @@ def write_pwa_assets():
 
     # Service worker: network-first for data (.json), cache-first for resten.
     sw = """const CACHE = 'analysor-v5';
-const CORE = ['./','./index.html','./report.html','./roadmap.html','./portfolio.html','./backtest.html',
+const CORE = ['./','./index.html','./trend.html','./report.html','./roadmap.html','./portfolio.html','./backtest.html',
   './lightweight-charts.standalone.production.js','./manifest.webmanifest'];
 self.addEventListener('install', e => {
   e.waitUntil(caches.open(CACHE).then(c => c.addAll(CORE)).then(()=>self.skipWaiting()));
