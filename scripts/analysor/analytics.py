@@ -190,13 +190,22 @@ def cyclical_pairs(raw):
 
 
 def money_flow(raw):
-    """Risk-appetitt-signaler med ROC (3M) + 50-dagers MA-status."""
+    """
+    Risk-appetitt / pengestrøm-signaler: ratio-ROC (3M) + 50d MA-status.
+    Hvert par fanger HVOR kapital strømmer (risikovillig vs trygg havn).
+    """
+    from .config import PALETTE
     defs = [
-        ("HYG", "TLT", "Kreditt-appetitt (HYG/TLT)", "Høy = risikovillig kapital søker yield"),
+        ("HYG", "TLT", "Kreditt-appetitt (HYG/TLT)", "Høy = risikovillig kapital søker yield i kreditt"),
         ("COPX", "GLD", "Vekst vs frykt (kobber/gull)", "Høy = vekstforventning over sikkerhet"),
         ("EEM", "ACWI", "EM-ledelse (EM/verden)", "Høy = risk-on, likviditet til periferien"),
+        ("XLY", "XLP", "Syklisk vs defensiv (XLY/XLP)", "Høy = forbrukere risk-on, lav = flukt til defensivt"),
+        ("IWM", "SPY", "Småselskaper vs store (IWM/SPY)", "Høy = bred risikovilje, lav = flukt til kvalitet"),
+        ("LQD", "IEF", "Kreditt vs stat (LQD/IEF)", "Høy = jakt på yield, lav = trygghet i statspapir"),
+        ("SOXX", "SPY", "Halvledere-ledelse (SOXX/SPY)", "Høy = offensiv tech-risiko leder markedet"),
     ]
     out = []
+    risk_on_n = risk_off_n = 0
     for n_id, d_id, label, note in defs:
         n, d = raw.get(n_id), raw.get(d_id)
         if n is None or d is None:
@@ -206,18 +215,97 @@ def money_flow(raw):
             continue
         ratio = comb["n"] / comb["d"]
         r3 = ind.roc(ratio, 63)
+        r1 = ind.roc(ratio, 21)
         ma50 = ratio.rolling(50).mean()
         over = bool(ratio.iloc[-1] > ma50.iloc[-1]) if pd.notna(ma50.iloc[-1]) else None
         risk_on = (r3 or 0) > 0 and bool(over)
-        from .config import PALETTE
+        if risk_on:
+            risk_on_n += 1
+        elif (r3 or 0) <= -2:
+            risk_off_n += 1
         out.append({
             "label": label, "roc_3m": round(r3, 1) if r3 is not None else None,
+            "roc_1m": round(r1, 1) if r1 is not None else None,
             "over_50ma": over,
             "state": "Risk-on" if risk_on else ("Nøytral" if (r3 or 0) > -2 else "Risk-off"),
             "col": PALETTE["up"] if risk_on else (PALETTE["warn"] if (r3 or 0) > -2 else PALETTE["down"]),
             "note": note,
         })
-    return out
+    # Samlet pengestrøm-verdikt
+    tot = risk_on_n + risk_off_n
+    n_all = len(out)
+    if n_all:
+        if risk_on_n >= n_all * 0.5:
+            flow_state, flow_col = "Risk-on", PALETTE["up"]
+            flow_note = f"{risk_on_n}/{n_all} strømmer mot risiko — kapital søker avkastning."
+        elif risk_off_n >= n_all * 0.5:
+            flow_state, flow_col = "Risk-off", PALETTE["down"]
+            flow_note = f"{risk_off_n}/{n_all} strømmer mot trygghet — kapital flykter til defensivt/gull."
+        else:
+            flow_state, flow_col = "Blandet", PALETTE["warn"]
+            flow_note = f"Pengestrøm spriker ({risk_on_n} risk-on, {risk_off_n} risk-off) — ingen klar retning."
+    else:
+        flow_state, flow_col, flow_note = "Ingen data", PALETTE["neutral"], ""
+    return {"pairs": out, "state": flow_state, "col": flow_col, "note": flow_note,
+            "risk_on_n": risk_on_n, "risk_off_n": risk_off_n, "n": n_all}
+
+
+def sector_flow(raw, assets_meta):
+    """
+    HVOR strømmer pengene på sektor-/sjanger-nivå: hver sektor måles på
+    relativ momentum (1M & 3M ratio-ROC) mot bredt marked (ACWI), priced in gold.
+    Rangerer innstrømning (positiv) vs utstrømning (negativ) — rotasjonsbildet.
+    """
+    from .config import PALETTE, INSTRUMENT_GROUPS
+    bench = raw.get("ACWI")
+    if bench is None:
+        bench = raw.get("SPY")
+    if bench is None:
+        return {"flows": []}
+    flows = []
+    for g in INSTRUMENT_GROUPS:
+        sec = g.get("sector")
+        iids = [i["id"] for i in g["instruments"] if raw.get(i["id"]) is not None]
+        if not iids:
+            continue
+        # Sektorindeks = likevektet snitt av medlemmenes ratio mot bench
+        r1s, r3s = [], []
+        for iid in iids:
+            df = raw.get(iid)
+            comb = pd.DataFrame({"n": df["close_use"], "d": bench["close_use"]}).dropna()
+            if len(comb) < 70:
+                continue
+            ratio = comb["n"] / comb["d"]
+            r1 = ind.roc(ratio, 21)
+            r3 = ind.roc(ratio, 63)
+            if r1 is not None:
+                r1s.append(r1)
+            if r3 is not None:
+                r3s.append(r3)
+        if not r3s:
+            continue
+        import numpy as _np
+        avg1 = float(_np.mean(r1s)) if r1s else None
+        avg3 = float(_np.mean(r3s)) if r3s else None
+        # Akselerasjon: strømmer pengene inn raskere (1M > 3M-snitt)?
+        accel = (avg1 is not None and avg3 is not None and avg1 > avg3 / 3)
+        flows.append({
+            "sector": sec, "display": "Råvarer" if sec == "Rawarer" else sec,
+            "roc_1m": round(avg1, 1) if avg1 is not None else None,
+            "roc_3m": round(avg3, 1) if avg3 is not None else None,
+            "accel": accel, "n": len(iids),
+        })
+    flows.sort(key=lambda x: (x["roc_3m"] if x["roc_3m"] is not None else -999), reverse=True)
+    # Marker inn-/utstrømning
+    for f in flows:
+        r3 = f["roc_3m"] or 0
+        if r3 > 1:
+            f["dir"], f["col"] = "Innstrømning", PALETTE["up"]
+        elif r3 < -1:
+            f["dir"], f["col"] = "Utstrømning", PALETTE["down"]
+        else:
+            f["dir"], f["col"] = "Nøytral", PALETTE["warn"]
+    return {"flows": flows, "baseline": ("ACWI" if raw.get("ACWI") is not None else "SPY")}
 
 
 def rotation(raw, assets_meta):
