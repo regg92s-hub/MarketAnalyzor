@@ -253,6 +253,7 @@ def main():
     glob_breadth = analytics.global_breadth(raw, config.BREADTH_GLOBAL_IDS)
     pairs = analytics.cyclical_pairs(raw)
     flow = analytics.money_flow(raw)
+    sec_flow = analytics.sector_flow(raw, assets_meta)
     rot = analytics.rotation(raw, assets_meta)
     rrg = analytics.build_rrg(raw, assets_meta)
     corr = analytics.build_correlation(raw)
@@ -276,38 +277,54 @@ def main():
 
     # Regime-historikk: append dagens composite-score -> tidslinje-stripe
     today = NOW.strftime("%Y-%m-%d")
-    rhist = load_prev_json("regime_history.json") or {"dates": [], "scores": [], "states": []}
-    comp = reg.get("composite") or {}
-    if comp.get("score") is not None and (not rhist["dates"] or rhist["dates"][-1] != today):
-        rhist["dates"].append(today)
-        rhist["scores"].append(comp["score"])
-        rhist["states"].append(comp.get("state", ""))
-        for k in ("dates", "scores", "states"):
-            rhist[k] = rhist[k][-365:]
-    with open(DOCS / "regime_history.json", "w", encoding="utf-8") as f:
-        json.dump(rhist, f, separators=(",", ":"), default=_json_default)
+    rhist_prev = load_prev_json("regime_history.json", fail_sentinel=True)
+    if rhist_prev is _FETCH_FAILED:
+        log("  ADVARSEL: regime_history kunne ikke hentes — hopper over skriving for å bevare historikk.")
+        rhist = {"dates": [], "scores": [], "states": []}  # kun for modellen; fila røres ikke
+    else:
+        rhist = rhist_prev or {"dates": [], "scores": [], "states": []}
+        comp = reg.get("composite") or {}
+        if comp.get("score") is not None and (not rhist["dates"] or rhist["dates"][-1] != today):
+            rhist["dates"].append(today)
+            rhist["scores"].append(comp["score"])
+            rhist["states"].append(comp.get("state", ""))
+            for k in ("dates", "scores", "states"):
+                rhist[k] = rhist[k][-365:]
+        with open(DOCS / "regime_history.json", "w", encoding="utf-8") as f:
+            json.dump(rhist, f, separators=(",", ":"), default=_json_default)
 
     # Paper-ledger ("regelen vs deg") + brukerens synkede portefølje
     usdnok_now = (round(float(raw["NOK"]["close_use"].iloc[-1]), 4)
                   if raw.get("NOK") is not None else None)
-    ledger = paper.update_paper_ledger(
-        load_prev_json("paper_ledger.json"), raw, config.CYCLICAL_IDS, usdnok_now, today)
-    user_pf_raw = load_user_portfolio()
-    user_val = paper.value_user_portfolio(user_pf_raw, raw, usdnok_now, assets)
-    if user_val:
-        ledger["actual_curve"] = (ledger.get("actual_curve") or [])[-730:]
-        if not ledger["actual_curve"] or ledger["actual_curve"][-1][0] != today:
-            ledger["actual_curve"].append((today, user_val["total_nok"]))
-    with open(DOCS / "paper_ledger.json", "w", encoding="utf-8") as f:
-        json.dump(ledger, f, separators=(",", ":"), default=_json_default)
+    prev_ledger = load_prev_json("paper_ledger.json", fail_sentinel=True)
+    if prev_ledger is _FETCH_FAILED:
+        log("  ADVARSEL: paper_ledger kunne ikke hentes — hopper over skriving for å bevare historikk.")
+        ledger = paper.update_paper_ledger(None, raw, config.CYCLICAL_IDS, usdnok_now, today)
+        user_pf_raw = load_user_portfolio()
+        user_val = paper.value_user_portfolio(user_pf_raw, raw, usdnok_now, assets)
+    else:
+        ledger = paper.update_paper_ledger(
+            prev_ledger, raw, config.CYCLICAL_IDS, usdnok_now, today)
+        user_pf_raw = load_user_portfolio()
+        user_val = paper.value_user_portfolio(user_pf_raw, raw, usdnok_now, assets)
+        if user_val:
+            ledger["actual_curve"] = (ledger.get("actual_curve") or [])[-730:]
+            if not ledger["actual_curve"] or ledger["actual_curve"][-1][0] != today:
+                ledger["actual_curve"].append((today, user_val["total_nok"]))
+        with open(DOCS / "paper_ledger.json", "w", encoding="utf-8") as f:
+            json.dump(ledger, f, separators=(",", ":"), default=_json_default)
 
     # 5. Samlet datamodell
     today_data = todaymod.build_today(assets, genres, reg, sector_summary,
-                                      user_portfolio=user_val, roadmaps=roadmaps)
+                                      user_portfolio=user_val, roadmaps=roadmaps,
+                                      money_flow=flow, sector_flow=sec_flow)
+    # Live anbefalings-logg: akkumulerer faktiske anbefalinger fremover
+    rec_log = append_recommendation_log(today_data, assets, usdnok_now)
     model = {
         "version": VERSION,
         "generated_local": NOW.isoformat(),
         "today": today_data,
+        "rec_log": rec_log,
         "assets": assets,
         "sector_summary": sector_summary,
         "ranking_gold": ranking_gold,
@@ -317,6 +334,7 @@ def main():
         "global_breadth": glob_breadth,
         "cyclical_pairs": pairs,
         "money_flow": flow,
+        "sector_flow": sec_flow,
         "rotation": rot,
         "rrg": rrg,
         "correlation": corr,
@@ -436,15 +454,113 @@ def signals_snapshot(model: dict) -> dict:
     return snap
 
 
-def load_score_history() -> dict:
-    """Score-historikk (snapshots) for hit-rate-validering."""
-    hist = load_prev_json("history/score_history.json") or {}
+def append_recommendation_log(today_data, assets, usdnok_now):
+    """
+    LIVE anbefalings-logg: lagrer faktiske kjøp-anbefalinger fra I dag-siden hver
+    dag, og fører en portefølje som FØLGER anbefalingene fra og med i dag. Dette er
+    forskjellig fra den historiske anbefalings-backtesten (som rekonstruerer fortiden):
+    denne akkumulerer ekte anbefalinger fremover, så kurven vokser etter hvert.
+
+    Modell: likevektet i alle aktive kjøp-anbefalinger. Når et instrument faller ut
+    av anbefalingene, selges det. Daglig verdsetting -> ekvitykurve.
+    Beskyttet mot historikk-tap på samme måte som score_history (sentinel).
+    """
+    log_prev = load_prev_json("history/recommendation_log.json", fail_sentinel=True)
+    if log_prev is _FETCH_FAILED:
+        log("  ADVARSEL: recommendation_log kunne ikke hentes — hopper over skriving "
+            "for å bevare anbefalings-historikk.")
+        return None
+    rlog = log_prev if isinstance(log_prev, dict) else {}
+    rlog.setdefault("inception", NOW.strftime("%Y-%m-%d"))
+    rlog.setdefault("curve", [])          # [(dato, indeksert verdi)]
+    rlog.setdefault("holdings", {})       # iid -> {entry_date, entry_price}
+    rlog.setdefault("events", [])         # logg over kjøp/salg
+    rlog.setdefault("closed", [])         # avsluttede handler m/ avkastning
+
+    today = NOW.strftime("%Y-%m-%d")
+    buys = {b["id"] for b in today_data.get("buys", [])}
+
+    def price(iid):
+        a = assets.get(iid, {})
+        ps = a.get("price_series") or []
+        return ps[-1][1] if ps else None
+
+    held = rlog["holdings"]
+    # Selg det som ikke lenger anbefales
+    for iid in list(held.keys()):
+        if iid not in buys:
+            p_now = price(iid)
+            ent = held[iid]
+            if p_now and ent.get("entry_price"):
+                ret = p_now / ent["entry_price"] - 1
+                rlog["closed"].append({"id": iid, "entry": ent["entry_date"],
+                                       "exit": today, "ret_pct": round(ret * 100, 1)})
+            rlog["events"].append({"date": today, "action": "SELG", "id": iid})
+            held.pop(iid, None)
+    # Kjøp nye anbefalinger
+    for iid in buys:
+        if iid not in held:
+            p = price(iid)
+            if p:
+                held[iid] = {"entry_date": today, "entry_price": p}
+                rlog["events"].append({"date": today, "action": "KJØP", "id": iid})
+
+    # Daglig porteføljeverdi indeksert til 100 ved inception.
+    prev_prices = rlog.get("_last_prices", {})
+    rets = []
+    cur_prices = {}
+    for iid in held:
+        p = price(iid)
+        if p is None:
+            continue
+        cur_prices[iid] = p
+        pp = prev_prices.get(iid)
+        if pp and pp > 0:
+            rets.append(p / pp - 1)
+    day_ret = sum(rets) / len(rets) if rets else 0.0
+    last_val = rlog["curve"][-1][1] if rlog["curve"] else 100.0
+    new_val = last_val * (1 + day_ret)
+    if rlog["curve"] and rlog["curve"][-1][0] == today:
+        rlog["curve"][-1] = [today, round(new_val, 3)]
+    else:
+        rlog["curve"].append([today, round(new_val, 3)])
+    rlog["curve"] = rlog["curve"][-1095:]
+    rlog["_last_prices"] = cur_prices
+    rlog["events"] = rlog["events"][-200:]
+    rlog["closed"] = rlog["closed"][-200:]
+
+    hdir = DOCS / "history"
+    hdir.mkdir(parents=True, exist_ok=True)
+    with open(hdir / "recommendation_log.json", "w", encoding="utf-8") as f:
+        json.dump(rlog, f, separators=(",", ":"), default=_json_default)
+    log(f"recommendation_log.json: {len(rlog['curve'])} dager, {len(held)} aktive posisjoner")
+    return {
+        "inception": rlog["inception"],
+        "curve": rlog["curve"],
+        "active": sorted(held.keys()),
+        "n_active": len(held),
+        "recent_events": rlog["events"][-10:],
+        "closed": rlog["closed"][-10:],
+    }
+
+
+def load_score_history():
+    """Score-historikk (snapshots) for hit-rate-validering. _FETCH_FAILED ved nettverksfeil."""
+    hist = load_prev_json("history/score_history.json", fail_sentinel=True)
+    if hist is _FETCH_FAILED:
+        return _FETCH_FAILED
     return hist if isinstance(hist, dict) else {}
 
 
 def append_score_history(assets: dict):
-    """Append dagens scorer til docs/history/score_history.json (en per dag)."""
+    """Append dagens scorer til docs/history/score_history.json (en per dag).
+    Hvis forrige historikk ikke kunne hentes, IKKE skriv tomt — la gh-pages-fila
+    overleve (keep_files: true). Beskytter mot at historikk nullstilles."""
     hist = load_score_history()
+    if hist is _FETCH_FAILED:
+        log("  ADVARSEL: kunne ikke hente score_history — hopper over skriving "
+            "for å bevare eksisterende historikk på gh-pages.")
+        return
     today = NOW.strftime("%Y-%m-%d")
     row = {iid: a["northstar_score"] for iid, a in assets.items()
            if not a.get("missing_data") and a.get("northstar_score") is not None}
@@ -461,8 +577,17 @@ def append_score_history(assets: dict):
     log(f"score_history.json: {len(hist)} datoer")
 
 
-def load_prev_json(name: str) -> dict | None:
-    """Hent en JSON-fil fra forrige bygg: lokal docs/<name>, ellers gh-pages rå-URL."""
+_FETCH_FAILED = object()  # sentinel: forrige tilstand kunne IKKE hentes (≠ tom)
+
+
+def load_prev_json(name: str, fail_sentinel: bool = False):
+    """
+    Hent en JSON-fil fra forrige bygg: lokal docs/<name>, ellers gh-pages rå-URL.
+
+    Returnerer None hvis fila genuint ikke finnes (første kjøring).
+    Hvis fail_sentinel=True OG et nettverkskall mislyktes, returneres _FETCH_FAILED
+    slik at kalleren kan la være å overskrive eksisterende historikk med tomt innhold.
+    """
     local = DOCS / name
     if local.exists():
         try:
@@ -477,8 +602,14 @@ def load_prev_json(name: str) -> dict | None:
             r = requests.get(url, timeout=20)
             if r.status_code == 200:
                 return r.json()
+            if r.status_code == 404:
+                return None  # finnes genuint ikke ennå
+            # annen status (5xx, rate-limit osv.) = usikkert -> ikke ødelegg historikk
+            log(f"  {name}: HTTP {r.status_code} ved henting av forrige tilstand")
+            return _FETCH_FAILED if fail_sentinel else None
         except Exception as e:
             log(f"  klarte ikke hente forrige {name}: {e}")
+            return _FETCH_FAILED if fail_sentinel else None
     return None
 
 
