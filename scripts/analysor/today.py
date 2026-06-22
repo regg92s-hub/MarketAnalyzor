@@ -44,7 +44,7 @@ def _macro_mult(regime):
 
 
 def build_today(assets, genre_strength, regime, sector_summary,
-                user_portfolio=None, roadmaps=None):
+                user_portfolio=None, roadmaps=None, money_flow=None, sector_flow=None):
     macro_mult, macro_state = _macro_mult(regime)
     genre = _genre_lookup(genre_strength)
     # sektor (norsk visningsnavn) -> sjanger-info via assets[].sector
@@ -114,24 +114,40 @@ def build_today(assets, genre_strength, regime, sector_summary,
     avoids.sort(key=lambda r: (r["stage"] != 2, -(r.get("dist36") or -999)))
     avoids = avoids[:8]
 
-    # Verdikt-linje
+    # Pengestrøm-sammendrag for kommando-båndet
+    mf = money_flow or {}
+    sf = sector_flow or {}
+    flows = sf.get("flows", [])
+    inflow = [f for f in flows if f.get("dir") == "Innstrømning"][:3]
+    outflow = [f for f in flows if f.get("dir") == "Utstrømning"][-3:]
+    flow_summary = {
+        "state": mf.get("state"), "col": mf.get("col"), "note": mf.get("note"),
+        "inflow": [{"sector": f["display"], "roc_3m": f["roc_3m"], "accel": f.get("accel")} for f in inflow],
+        "outflow": [{"sector": f["display"], "roc_3m": f["roc_3m"]} for f in outflow],
+    }
+
+    # Verdikt-linje (nå med pengestrøm)
     n_buys = len(buys)
     top_sym = buys[0]["sym"] if buys else None
+    flow_txt = ""
+    if mf.get("state") and mf["state"] != "Ingen data":
+        flow_txt = f" Pengestrøm: {mf['state'].lower()}."
     if macro_state == "risk-off":
-        verdict = (f"Makro risk-off — vær defensiv. {n_buys} kvalifiserte kjøp-kandidater "
+        verdict = (f"Makro risk-off — vær defensiv.{flow_txt} {n_buys} kvalifiserte kjøp-kandidater "
                    "tross motvind. Vurder gull/kontanter og lav beta.")
     elif n_buys == 0:
-        verdict = ("Ingen instrumenter i ekte lavrisiko-entry akkurat nå. "
+        verdict = (f"Ingen instrumenter i ekte lavrisiko-entry akkurat nå.{flow_txt} "
                    "Tålmodighet er en posisjon — vent på breakout fra base.")
     else:
         lead = f"Ledende: {top_sym}." if top_sym else ""
-        verdict = (f"Makro {macro_state}. {n_buys} kjøp-kandidater i lavrisiko-entry med "
+        verdict = (f"Makro {macro_state}.{flow_txt} {n_buys} kjøp-kandidater i lavrisiko-entry med "
                    f"sjanger-/makro-medvind. {lead}")
 
     return {
         "verdict": verdict,
         "macro_state": macro_state,
         "macro_score": (regime or {}).get("composite", {}).get("score"),
+        "flow": flow_summary,
         "buys": buys,
         "avoids": avoids,
         "leaderboard": leaderboard,
