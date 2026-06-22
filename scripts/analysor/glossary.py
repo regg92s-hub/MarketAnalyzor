@@ -102,6 +102,14 @@ EXPLAIN = {
         "what": "Mansfield relativ styrke: ratio vs benchmark normalisert mot eget 52-ukers snitt.",
         "do": "Over null = leder benchmark (gull/SPY). Under null = henger etter.",
     },
+    "money_flow": {
+        "what": "Hvor kapitalen strømmer: risikovillige forhold (kreditt, syklisk, EM, småselskap) vs trygge havner.",
+        "do": "Risk-on = medvind for aksjer/krypto. Risk-off = kapital flykter til gull/stat/defensivt — reduser beta.",
+    },
+    "sector_flow": {
+        "what": "Sektor-rotasjon: hvilke sjangre kapital strømmer inn i vs ut av, målt mot bredt marked.",
+        "do": "Kjøp helst der pengene strømmer INN (innstrømning + akselererende). Unngå utstrømning.",
+    },
 }
 
 
