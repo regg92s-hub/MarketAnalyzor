@@ -1,708 +1,360 @@
-#!/usr/bin/env python3
-"""
-Hovedbygg for market-analysor.
-
-Kjører hele pipelinen:
-  1. Hent priser (yfinance) for alle instrumenter + NOK for TV-lenker
-  2. Beregn Northstar-score, risikometrikker, prisserier
-  3. Leadership ranking (ROC vs gull/dollar), sjanger-styrke, bredde, regime, par, money flow
-  4. Skriv index.json (minifisert) + tre HTML-sider (Lightweight Charts)
-  5. Last ned/­selvhost Lightweight Charts-biblioteket
-
-Kjør lokalt:  python scripts/build.py
-GitHub Actions kjører dette daglig og deployer docs/ til gh-pages.
-"""
-from __future__ import annotations
-import json
-import os
-import sys
-from datetime import datetime, timezone, timedelta
-from pathlib import Path
-
-# Gjør pakken importerbar uansett arbeidskatalog
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-
-import pandas as pd  # noqa: E402
-import numpy as np  # noqa: E402
-
-
-def _json_default(o):
-    """Gjør numpy-typer (bool_, int64, float64) JSON-serialiserbare."""
-    if isinstance(o, (np.bool_,)):
-        return bool(o)
-    if isinstance(o, (np.integer,)):
-        return int(o)
-    if isinstance(o, (np.floating,)):
-        return float(o)
-    if isinstance(o, (np.ndarray,)):
-        return o.tolist()
-    raise TypeError(f"Object of type {o.__class__.__name__} is not JSON serializable")
-
-from analysor import config, data as datamod, scoring, analytics, regime as regimemod, render, portfolio, backtest as backtestmod, benchmarks as benchmarksmod, paper, roadmap as roadmapmod, validation as validationmod, today as todaymod  # noqa: E402
-from analysor.config import VERSION, PALETTE  # noqa: E402
-from analysor.layout import LWC_CDN, LWC_LOCAL  # noqa: E402
-from analysor import indicators as ind  # noqa: E402
-
-OSLO = timezone(timedelta(hours=2))
-NOW = datetime.now(OSLO)
-DOCS = Path(__file__).resolve().parent.parent / "docs"
-CHARTS_HISTORY_DAYS = 400  # antall dagspunkter i prisgrafen
-
-
-def log(m):
-    print(m, flush=True)
-
-
-def price_series_for_chart(df: pd.DataFrame, days: int = CHARTS_HISTORY_DAYS):
-    """[(YYYY-MM-DD, close)] for Lightweight Charts."""
-    c = df["close_use"].dropna().tail(days)
-    return [(idx.strftime("%Y-%m-%d"), round(float(v), 4)) for idx, v in c.items()]
-
-
-def chart_data_nsbc(df: pd.DataFrame, days: int = 350) -> dict:
-    """
-    Rik chart-data med NSBC-indikatorer (beregnet i pandas, sendt som serier):
-    candles (OHLC), 12 & 36 SMA, Ichimoku-sky (span A/B). Tegnes på ukentlig
-    oppløsning (NSBCs mellom-bilde). Payload-trimmet: ~70 uker, 2-3 desimaler.
-    """
-    import numpy as np
-    d = df.dropna(subset=["close_use"])
-    if len(d) < 60:
-        return {}
-    wk = pd.DataFrame()
-    wk["close"] = d["close_use"].resample("W-FRI").last()
-    wk["high"] = (d["high"] if "high" in d else d["close_use"]).resample("W-FRI").max()
-    wk["low"] = (d["low"] if "low" in d else d["close_use"]).resample("W-FRI").min()
-    wk["open"] = (d["open"] if "open" in d else d["close_use"]).resample("W-FRI").first()
-    wk = wk.dropna()
-    if len(wk) < 60:
-        return {}
-    weeks = min(len(wk), days // 5)
-    wk = wk.tail(weeks + 60)
-
-    sma12 = wk["close"].rolling(12).mean()
-    sma36 = wk["close"].rolling(36).mean()
-    conv = (wk["high"].rolling(9).max() + wk["low"].rolling(9).min()) / 2
-    base = (wk["high"].rolling(26).max() + wk["low"].rolling(26).min()) / 2
-    span_a = ((conv + base) / 2)
-    span_b = (wk["high"].rolling(52).max() + wk["low"].rolling(52).min()) / 2
-
-    # Adaptiv presisjon: små priser (ratioer) trenger flere desimaler
-    lastv = float(wk["close"].iloc[-1])
-    nd = 2 if lastv >= 10 else (4 if lastv >= 0.1 else 6)
-
-    def ser(s):
-        s = s.dropna().tail(weeks)
-        return [(idx.strftime("%y-%m-%d"), round(float(v), nd)) for idx, v in s.items()]
-
-    def candle_ser():
-        out = []
-        for idx, row in wk.tail(weeks).iterrows():
-            out.append({"t": idx.strftime("%y-%m-%d"),
-                        "o": round(float(row["open"]), nd), "h": round(float(row["high"]), nd),
-                        "l": round(float(row["low"]), nd), "c": round(float(row["close"]), nd)})
-        return out
-
-    return {
-        "candles": candle_ser(),
-        "sma12": ser(sma12), "sma36": ser(sma36),
-        "cloud_a": ser(span_a), "cloud_b": ser(span_b),
-    }
-
-
-def main():
-    DOCS.mkdir(parents=True, exist_ok=True)
-    (DOCS / "charts").mkdir(exist_ok=True)
-    force = os.environ.get("FORCE_RUN", "").lower() in ("1", "true", "yes")
-    log(f"market-analysor {VERSION} — start {NOW.isoformat()} (force={force})")
-
-    meta_list = config.all_instruments()
-    assets_meta = {m["id"]: m for m in meta_list}
-
-    # 1. Hent priser
-    raw = {}
-    for m in meta_list:
-        log(f"Henter {m['id']}...")
-        df, resolved = datamod.fetch_one(m["candidates"])
-        if df is None:
-            log(f"  MANGLER: {m['id']}")
-            continue
-        raw[m["id"]] = df
-    # NOK for TV-lenker/rotasjon (ikke et scoret instrument)
-    nok_df, _ = datamod.fetch_one(["NOK=X"])
-    if nok_df is not None:
-        raw["NOK"] = nok_df
-
-    # 2. Score + risiko + prisserie per instrument
-    assets = {}
-    gld = raw.get("GLD")
-    for m in meta_list:
-        iid = m["id"]
-        a = {
-            "id": iid, "display_name": m["label"], "symbol_label": m["symbol_label"],
-            "sector": m["sector"], "subclass": m["subclass"],
-            "category_title": m["category_title"],
-        }
-        df = raw.get(iid)
-        if df is None:
-            a["missing_data"] = True
-            assets[iid] = a
-            continue
-        frames = datamod.resample_frames(df)
-        score, meta = scoring.nsbc_score(frames)
-        a["northstar_score"] = score
-        a["missing_data"] = False
-        a["price_last"] = round(float(df["close_use"].iloc[-1]), 4)
-        a["price_series"] = price_series_for_chart(df)
-        a["chart_nsbc"] = chart_data_nsbc(df)
-        a["risk"] = ind.risk_metrics(df["close_use"], config.RISK_LOOKBACK_DAYS, config.RISK_FREE_ANNUAL)
-        # NSBC-tilstand: langtid (regime) × korttid (timing) + evidens
-        a["lt_state"] = meta.get("long_term")
-        a["st_state"] = meta.get("short_term")
-        a["evidence"] = meta.get("evidence", [])
-        a["ticks"] = meta.get("ticks", 0)
-        a["stretched"] = meta.get("stretched", False)
-        a["breakout"] = meta.get("breakout", False)
-        a["dist36_w"] = meta.get("dist36")
-        a["state_label"] = scoring.state_label(meta.get("long_term"), meta.get("short_term"))
-        a["stage"] = meta.get("stage")
-        a["stage_label"] = meta.get("stage_label")
-        a["stage_reason"] = meta.get("stage_reason")
-        wf = meta.get("frames", {}).get("weekly", {})
-        qf = meta.get("frames", {}).get("quarterly", {})
-        mf = meta.get("frames", {}).get("monthly", {})
-        # Avstand fra 12 & 36 MA på ukentlig OG månedlig (NSBC distance-gauge)
-        a["dist_w"] = {"d12": wf.get("dist12"), "d36": wf.get("dist36")}
-        a["dist_m"] = {"d12": mf.get("dist12"), "d36": mf.get("dist36")}
-        # porteføljens overkjøpt/stretched-sjekk bruker nå NSBC-evidens
-        a["rsi_q"] = qf.get("srsi_k")
-        a["overbought_w"] = bool(wf.get("srsi_overbought"))
-        a["stretched_w"] = bool(wf.get("stretched"))
-        # sektor-trend: over 12&36 MA (ukentlig) = NSBC bull-gate
-        a["close_above_sma50_w"] = wf.get("above_both_ma")
-        # slår gull (ROC 1M/3M)
-        if gld is not None and iid != "GLD":
-            b = ind.beats_baseline(df["close_use"], gld["close_use"],
-                                   config.BEATS_ROC_HORIZONS, config.ROC_HORIZONS)
-            a["gold_beat"] = ({"beats": b["beats"], "tf_over": b["tf_over"],
-                               "mansfield": b.get("mansfield"),
-                               "roc3m": (b.get("roc") or {}).get("3M")}
-                              if b["beats"] is not None else None)
-        else:
-            a["gold_beat"] = None
-        assets[iid] = a
-        log(f"  OK {iid}: score={score}")
-
-    # 3. Sektorscore + trend (weekly 50MA)
-    sector_summary = {}
-    sec_scores = {}
-    for iid, a in assets.items():
-        if a.get("missing_data"):
-            continue
-        sec_scores.setdefault(a["sector"], []).append(iid)
-    for sec, iids in sec_scores.items():
-        vals = [assets[i]["northstar_score"] for i in iids]
-        avg = round(sum(vals) / len(vals), 1)
-        over = sum(1 for i in iids if assets[i].get("close_above_sma50_w") is True)
-        tot = sum(1 for i in iids if assets[i].get("close_above_sma50_w") is not None)
-        pct_over = round(over / tot * 100) if tot else None
-        # Aggreger stage: hvor mange medlemmer i nedtrend (Stage 4) vs opptrend (Stage 2)
-        stages = [assets[i].get("stage") for i in iids if assets[i].get("stage")]
-        n_down = sum(1 for s in stages if s == 4)
-        n_up = sum(1 for s in stages if s == 2)
-        n_stretch = sum(1 for i in iids if assets[i].get("stretched"))
-        if tot and over / tot >= 0.5:
-            ttxt, tcol = f"Opptrend — {pct_over}% over 30-ukers MA (ukentlig)", PALETTE["up"]
-        elif tot:
-            ttxt, tcol = f"Svak — bare {pct_over}% over 30-ukers MA (ukentlig)", PALETTE["warn"]
-        else:
-            ttxt, tcol = "Ingen data", PALETTE["neutral"]
-        # KORRIGERT etikett: skiller nedtrend fra strukket på sektornivå
-        if stages and n_down >= len(stages) * 0.5:
-            lab, scol = "Nedtrend (Stage 4)", PALETTE["down"]
-        elif n_stretch >= max(1, len(iids) * 0.5):
-            lab, scol = "Strukket (FOMO-sone)", PALETTE["warn"]
-        else:
-            lab, scol = scoring.score_label(int(round(avg)))
-        # Plain-language forklaring i boksen
-        if lab.startswith("Nedtrend"):
-            explain = (f"{n_down} av {len(iids)} instrumenter er i nedtrend (under fallende 12&36-MA). "
-                       "Lav score = ingen bullish bevis, IKKE strukket. Unngå nye kjøp; vent på base.")
-        elif lab.startswith("Strukket"):
-            explain = ("Sektoren er i opptrend, men flere medlemmer er strukket fra 36-MA (FOMO-sone). "
-                       "Eiere kan holde; nye kjøp har høy risiko. Vent på tilbaketrekk/konsolidering.")
-        elif avg >= 70:
-            explain = "Flere medlemmer i ekte lavrisiko-entry (over trend, ikke strukket, bryter ut)."
-        else:
-            explain = (f"Snittscore {avg}/100 over ukentlig/månedlig/kvartal. "
-                       f"{n_up} i opptrend, {n_down} i nedtrend. Se enkeltinstrumenter for detaljer.")
-        sector_summary[sec] = {
-            "display": "Råvarer" if sec == "Rawarer" else sec,
-            "avg_score": avg, "label": lab, "score_col": scol,
-            "trend_txt": ttxt, "trend_col": tcol,
-            "over_ma50": over, "total_ma50": tot, "pct_over": pct_over, "n": len(iids),
-            "n_down": n_down, "n_up": n_up, "explain": explain,
-        }
-
-    # 4. Analyselag
-    ranking_gold = analytics.build_ranking(raw, "GLD", "Gull (GLD)", assets_meta)
-    ranking_dxy = analytics.build_ranking(raw, "UUP", "Dollar (UUP)", assets_meta)
-    genres = analytics.genre_strength(raw, assets_meta)
-    universe = [m["id"] for m in meta_list if not assets.get(m["id"], {}).get("missing_data")]
-    breadth = analytics.breadth(raw, universe)
-    glob_breadth = analytics.global_breadth(raw, config.BREADTH_GLOBAL_IDS)
-    pairs = analytics.cyclical_pairs(raw)
-    flow = analytics.money_flow(raw)
-    rot = analytics.rotation(raw, assets_meta)
-    rrg = analytics.build_rrg(raw, assets_meta)
-    corr = analytics.build_correlation(raw)
-    bt = backtestmod.run_backtest(raw, config.CYCLICAL_IDS, top_n=5)
-    # Anbefalings-backtest: "hvis alle NSBC-anbefalinger var fulgt"
-    rec_bt = backtestmod.run_recommendation_backtest(raw, config.CYCLICAL_IDS)
-    # Auto-roadmaps (NSBC-stil) for hele universet
-    roadmaps = roadmapmod.build_all_roadmaps(raw, assets_meta, gld=raw.get("GLD"))
-    # Hit-rate-validering fra score-historikk
-    score_hist = load_score_history()
-    validation = validationmod.forward_returns(raw, raw.get("GLD"), score_hist)
-    reg = regimemod.build_regime(os.environ.get("FRED_API_KEY", ""))
-    # Panikk-tilstand (Daniel & Moskowitz) inn i regimet
-    pstate = analytics.panic_state(raw)
-    if pstate:
-        reg["panic"] = pstate
-
-    # Benchmarks: norsk KPI (SSB), USDNOK/NOWA (Norges Bank), US CPI, gull
-    bench = benchmarksmod.build_benchmarks(
-        raw, regimemod.fetch_fred_series, os.environ.get("FRED_API_KEY", ""))
-
-    # Regime-historikk: append dagens composite-score -> tidslinje-stripe
-    today = NOW.strftime("%Y-%m-%d")
-    rhist = load_prev_json("regime_history.json") or {"dates": [], "scores": [], "states": []}
-    comp = reg.get("composite") or {}
-    if comp.get("score") is not None and (not rhist["dates"] or rhist["dates"][-1] != today):
-        rhist["dates"].append(today)
-        rhist["scores"].append(comp["score"])
-        rhist["states"].append(comp.get("state", ""))
-        for k in ("dates", "scores", "states"):
-            rhist[k] = rhist[k][-365:]
-    with open(DOCS / "regime_history.json", "w", encoding="utf-8") as f:
-        json.dump(rhist, f, separators=(",", ":"), default=_json_default)
-
-    # Paper-ledger ("regelen vs deg") + brukerens synkede portefølje
-    usdnok_now = (round(float(raw["NOK"]["close_use"].iloc[-1]), 4)
-                  if raw.get("NOK") is not None else None)
-    ledger = paper.update_paper_ledger(
-        load_prev_json("paper_ledger.json"), raw, config.CYCLICAL_IDS, usdnok_now, today)
-    user_pf_raw = load_user_portfolio()
-    user_val = paper.value_user_portfolio(user_pf_raw, raw, usdnok_now, assets)
-    if user_val:
-        ledger["actual_curve"] = (ledger.get("actual_curve") or [])[-730:]
-        if not ledger["actual_curve"] or ledger["actual_curve"][-1][0] != today:
-            ledger["actual_curve"].append((today, user_val["total_nok"]))
-    with open(DOCS / "paper_ledger.json", "w", encoding="utf-8") as f:
-        json.dump(ledger, f, separators=(",", ":"), default=_json_default)
-
-    # 5. Samlet datamodell
-    today_data = todaymod.build_today(assets, genres, reg, sector_summary,
-                                      user_portfolio=user_val, roadmaps=roadmaps)
-    model = {
-        "version": VERSION,
-        "generated_local": NOW.isoformat(),
-        "today": today_data,
-        "assets": assets,
-        "sector_summary": sector_summary,
-        "ranking_gold": ranking_gold,
-        "ranking_dxy": ranking_dxy,
-        "genre_strength": genres,
-        "breadth": breadth,
-        "global_breadth": glob_breadth,
-        "cyclical_pairs": pairs,
-        "money_flow": flow,
-        "rotation": rot,
-        "rrg": rrg,
-        "correlation": corr,
-        "backtest": bt,
-        "rec_backtest": rec_bt,
-        "roadmaps": roadmaps,
-        "validation": validation,
-        "regime": reg,
-        "benchmarks": bench,
-        "regime_history": rhist,
-        "paper": {"curve": ledger.get("curve", [])[-400:],
-                  "actual_curve": ledger.get("actual_curve", [])[-400:],
-                  "events": ledger.get("events", [])[-6:],
-                  "positions": sorted(ledger.get("positions", {}).keys()),
-                  "start_nok": ledger.get("start_nok")},
-        "user_portfolio": user_val,
-        "notes": {"instrument_count": len(universe)},
-        "usdnok": (round(float(raw["NOK"]["close_use"].iloc[-1]), 4)
-                   if raw.get("NOK") is not None else None),
-    }
-
-    # 5b. Signal-snapshot + diff mot forrige bygg + Discord-varsel
-    snapshot = signals_snapshot(model)
-    prev = load_prev_signals()
-    changes = compute_changes(prev, snapshot)
-    model["changes"] = changes
-    with open(DOCS / "signals.json", "w", encoding="utf-8") as f:
-        json.dump(snapshot, f, ensure_ascii=False, separators=(",", ":"), default=_json_default)
-    log(f"signals.json skrevet ({len(changes)} endringer siden forrige bygg)")
-    notify_discord(changes, user_val)
-
-    # 5c. Append dagens NSBC-scorer til historikk (for hit-rate-validering)
-    append_score_history(assets)
-
-    # AI-morgenbrief (valgfri, krever ANTHROPIC_API_KEY) — strengt grunnet
-    # i beregnede signaler, aldri egne tall.
-    model["ai_brief"] = build_ai_brief(model)
-
-    # 6. Skriv index.json (minifisert). Strip tunge chart-data — trend-siden
-    # rendrer ikke per-instrument-charts, og report/roadmap-sidene embedder
-    # sine egne chart-data direkte i HTML. Dette holder index.json liten.
-    import copy as _copy
-    slim = dict(model)
-    slim_assets = {}
-    for iid, a in model.get("assets", {}).items():
-        a2 = {k: v for k, v in a.items() if k not in ("chart_nsbc", "price_series")}
-        slim_assets[iid] = a2
-    slim["assets"] = slim_assets
-    # Roadmaps: dropp candle-arrays fra index.json (kun HTML trenger dem)
-    slim_rm = {}
-    for iid, entry in model.get("roadmaps", {}).items():
-        e2 = {}
-        for variant, rm in entry.items():
-            if isinstance(rm, dict):
-                e2[variant] = {k: v for k, v in rm.items() if k != "chart"}
-            else:
-                e2[variant] = rm
-        slim_rm[iid] = e2
-    slim["roadmaps"] = slim_rm
-    with open(DOCS / "index.json", "w", encoding="utf-8") as f:
-        json.dump(slim, f, ensure_ascii=False, separators=(",", ":"), default=_json_default)
-    log(f"index.json skrevet ({(DOCS/'index.json').stat().st_size} bytes)")
-
-    # 7. HTML-sider
-    (DOCS / "index.html").write_text(render.render_today(model), encoding="utf-8")
-    (DOCS / "trend.html").write_text(render.render_trend(model), encoding="utf-8")
-    (DOCS / "report.html").write_text(render.render_report(model), encoding="utf-8")
-    (DOCS / "roadmap.html").write_text(render.render_roadmap(model), encoding="utf-8")
-    (DOCS / "portfolio.html").write_text(portfolio.render_portfolio(model), encoding="utf-8")
-    (DOCS / "backtest.html").write_text(render.render_backtest(model), encoding="utf-8")
-    log("HTML-sider skrevet")
-
-    # 8. Selvhost Lightweight Charts (last ned hvis mangler)
-    ensure_lwc()
-
-    # 8b. PWA-ressurser (manifest, service worker, ikoner) — installerbar
-    # hjemskjerm + offline. Push krever server -> Discord forblir varselkanal.
-    write_pwa_assets()
-
-    # 9. .nojekyll så GitHub Pages ikke prosesserer
-    (DOCS / ".nojekyll").write_text("", encoding="utf-8")
-
-    log(f"FERDIG — {len(universe)} instrumenter, versjon={VERSION}")
-
-
-def ensure_lwc():
-    """Last ned Lightweight Charts til docs/ for selvhosting (én gang)."""
-    dest = DOCS / LWC_LOCAL
-    if dest.exists() and dest.stat().st_size > 50000:
-        log("Lightweight Charts allerede selvhostet")
-        return
-    try:
-        import urllib.request
-        log("Laster ned Lightweight Charts for selvhosting...")
-        urllib.request.urlretrieve(LWC_CDN, dest)
-        log(f"  lagret {dest.stat().st_size} bytes")
-    except Exception as e:
-        log(f"  ADVARSEL: klarte ikke laste ned LWC ({e}). Grafer vil ikke vises før filen finnes.")
-
-
-# ── Signal-diff + Discord-varsling ───────────────────────────────
-def signals_snapshot(model: dict) -> dict:
-    """Kompakt snapshot av dagens signaler for diff mot neste bygg."""
-    snap = {"date": NOW.strftime("%Y-%m-%d")}
-    snap["genres"] = {g["genre"]: g["state"] for g in model.get("genre_strength", [])}
-    snap["gold_beat"] = {
-        iid: (a.get("gold_beat") or {}).get("beats")
-        for iid, a in model.get("assets", {}).items()
-        if not a.get("missing_data") and a.get("gold_beat") is not None
-    }
-    rot = model.get("rotation") or {}
-    snap["rotation_beats"] = sorted(x["id"] for x in rot.get("beats", []))
-    comp = (model.get("regime") or {}).get("composite") or {}
-    snap["regime_state"] = comp.get("state")
-    br = model.get("breadth") or {}
-    snap["breadth50"] = br.get("pct_over_50ma")
-    return snap
-
-
-def load_score_history() -> dict:
-    """Score-historikk (snapshots) for hit-rate-validering."""
-    hist = load_prev_json("history/score_history.json") or {}
-    return hist if isinstance(hist, dict) else {}
-
-
-def append_score_history(assets: dict):
-    """Append dagens scorer til docs/history/score_history.json (en per dag)."""
-    hist = load_score_history()
-    today = NOW.strftime("%Y-%m-%d")
-    row = {iid: a["northstar_score"] for iid, a in assets.items()
-           if not a.get("missing_data") and a.get("northstar_score") is not None}
-    row["_real"] = True
-    hist[today] = row
-    keys = sorted(hist.keys())
-    if len(keys) > 520:
-        for k in keys[:-520]:
-            hist.pop(k, None)
-    hdir = DOCS / "history"
-    hdir.mkdir(parents=True, exist_ok=True)
-    with open(hdir / "score_history.json", "w", encoding="utf-8") as f:
-        json.dump(hist, f, separators=(",", ":"), default=_json_default)
-    log(f"score_history.json: {len(hist)} datoer")
-
-
-def load_prev_json(name: str) -> dict | None:
-    """Hent en JSON-fil fra forrige bygg: lokal docs/<name>, ellers gh-pages rå-URL."""
-    local = DOCS / name
-    if local.exists():
-        try:
-            return json.loads(local.read_text(encoding="utf-8"))
-        except Exception:
-            pass
-    repo = os.environ.get("GITHUB_REPOSITORY", "")
-    if repo:
-        try:
-            import requests
-            url = f"https://raw.githubusercontent.com/{repo}/gh-pages/{name}"
-            r = requests.get(url, timeout=20)
-            if r.status_code == 200:
-                return r.json()
-        except Exception as e:
-            log(f"  klarte ikke hente forrige {name}: {e}")
-    return None
-
-
-def load_prev_signals() -> dict | None:
-    """Forrige byggs signaler (spesialtilfelle av load_prev_json)."""
-    return load_prev_json("signals.json")
-
-
-def load_user_portfolio() -> dict | None:
-    """
-    Brukerens synkede portefølje fra docs/portfolio.json (committet via
-    eksport-knappen på porteføljesiden). Leses kun fra repoet (main-branch
-    checkout under bygg) — aldri fra klienten. Mangler den, kjøres alt uten.
-    """
-    p = DOCS.parent / "docs" / "portfolio.json"
-    # docs/portfolio.json ligger i repoet (ikke generert) -> sjekk repo-roten
-    candidates = [DOCS / "portfolio.json", Path(__file__).resolve().parent.parent / "docs" / "portfolio.json"]
-    for c in candidates:
-        if c.exists():
-            try:
-                return json.loads(c.read_text(encoding="utf-8"))
-            except Exception:
-                pass
-    return None
-
-
-def build_ai_brief(model: dict) -> dict | None:
-    """
-    AI-morgenbrief på norsk (~150-220 ord), strengt grunnet i beregnede signaler.
-    Krever ANTHROPIC_API_KEY. Modell via ANTHROPIC_MODEL (default haiku).
-    Degraderer til None uten nøkkel eller ved enhver feil.
-    """
-    key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
-    if not key:
-        log("AI-brief: ingen ANTHROPIC_API_KEY (hopper over)")
-        return None
-    try:
-        import requests
-        reg = model.get("regime", {})
-        comp = reg.get("composite", {})
-        # Kompakt, FAKTISK signal-subsett — modellen får KUN disse tallene
-        facts = {
-            "regime": {"state": comp.get("state"), "score": comp.get("score"),
-                       "kort": {k: v.get("label") for k, v in reg.items()
-                                if isinstance(v, dict) and "label" in v}},
-            "endringer": model.get("changes", []),
-            "ledere_mot_gull": [r["label"] for r in model.get("ranking_gold", {}).get("rows", [])[:5]
-                                if r.get("beats")],
-            "sjangrer_medvind": [g["genre"] for g in model.get("genre_strength", [])
-                                 if g.get("medvind")],
-            "bredde_50": model.get("breadth", {}).get("pct_over_50ma"),
-            "paper_vs_start": {
-                "start": model.get("paper", {}).get("start_nok"),
-                "naa": (model.get("paper", {}).get("curve") or [[None, None]])[-1][1]},
-        }
-        sys_prompt = (
-            "Du er en nøktern norsk markedsanalytiker. Skriv en morgenbrief på 150-220 ord "
-            "basert UTELUKKENDE på de oppgitte tallene. Ikke finn på tall, priser eller "
-            "hendelser. Si 'ukjent' hvis noe mangler. Vev regime, endringer, ledere mot gull "
-            "og bredde til en sammenhengende tekst. Avslutt med 'Ikke finansrådgivning.' "
-            "Ingen punktlister, kun prosa.")
-        payload = {
-            "model": os.environ.get("ANTHROPIC_MODEL", "claude-haiku-4-5"),
-            "max_tokens": 600,
-            "system": sys_prompt,
-            "messages": [{"role": "user",
-                          "content": "Signaler i dag (JSON):\n" + json.dumps(facts, ensure_ascii=False)}],
-        }
-        r = requests.post("https://api.anthropic.com/v1/messages",
-                          headers={"x-api-key": key, "anthropic-version": "2023-06-01",
-                                   "content-type": "application/json"},
-                          json=payload, timeout=40)
-        if r.status_code != 200:
-            log(f"AI-brief: API {r.status_code} (hopper over)")
-            return None
-        text = "".join(b.get("text", "") for b in r.json().get("content", [])
-                       if b.get("type") == "text").strip()
-        if not text:
-            return None
-        log(f"AI-brief: generert ({len(text)} tegn)")
-        return {"text": text, "model": payload["model"], "date": NOW.strftime("%Y-%m-%d")}
-    except Exception as e:
-        log(f"AI-brief: feil ({e})")
-        return None
-
-
-def compute_changes(prev: dict | None, cur: dict) -> list:
-    """Menneskelesbare endringer siden forrige bygg (norsk)."""
-    if not prev:
-        return []
-    ch = []
-    pg, cg = prev.get("genres", {}), cur.get("genres", {})
-    for genre, state in cg.items():
-        old = pg.get(genre)
-        if old is not None and old != state:
-            icon = "▲" if state == "I medvind" else ("▼" if state == "Nedadgående" else "•")
-            ch.append(f"{icon} Sjanger {genre}: {old} → {state}")
-    pb, cb = prev.get("gold_beat", {}), cur.get("gold_beat", {})
-    flipped_up = [i for i, v in cb.items() if v is True and pb.get(i) is False]
-    flipped_dn = [i for i, v in cb.items() if v is False and pb.get(i) is True]
-    if flipped_up:
-        ch.append("▲ Slår gull nå: " + ", ".join(sorted(flipped_up)))
-    if flipped_dn:
-        ch.append("▼ Taper mot gull nå: " + ", ".join(sorted(flipped_dn)))
-    if prev.get("regime_state") and cur.get("regime_state") and \
-            prev["regime_state"] != cur["regime_state"]:
-        ch.append(f"⚠ Regime: {prev['regime_state']} → {cur['regime_state']}")
-    p50, c50 = prev.get("breadth50"), cur.get("breadth50")
-    if p50 is not None and c50 is not None:
-        if p50 >= 50 > c50:
-            ch.append(f"▼ Bredde under 50% (over 50d-MA: {p50}% → {c50}%)")
-        elif p50 < 50 <= c50:
-            ch.append(f"▲ Bredde over 50% (over 50d-MA: {p50}% → {c50}%)")
-    return ch
-
-
-def notify_discord(changes: list, user_val: dict | None = None):
-    """Send endringer + dine posisjons-verdikter til Discord (DISCORD_WEBHOOK_URL)."""
-    url = os.environ.get("DISCORD_WEBHOOK_URL", "").strip()
-    if not url:
-        log("Discord: ingen webhook satt (hopper over)")
-        return
-    # Posisjoner som krever handling (SKALER AV / VURDER SKALER AV)
-    action_lines = []
-    if user_val:
-        for r in user_val.get("rows", []):
-            if r["verdict"] in ("SKALER AV", "VURDER SKALER AV"):
-                action_lines.append(f"• {r['sym']}: {r['verdict']} ({r['why']})")
-    if not changes and not action_lines:
-        log("Discord: ingen endringer å varsle")
-        return
-    try:
-        import requests
-        body = "**📊 Market Analysor — " + NOW.strftime("%d.%m.%Y") + "**\n"
-        if changes:
-            body += "\n".join(changes)
-        if action_lines:
-            body += "\n\n**Dine posisjoner:**\n" + "\n".join(action_lines)
-        repo = os.environ.get("GITHUB_REPOSITORY", "")
-        if repo:
-            owner, name = repo.split("/", 1)
-            body += f"\n<https://{owner}.github.io/{name}/>"
-        r = requests.post(url, json={"content": body[:1950]}, timeout=20)
-        log(f"Discord: varsel sendt ({r.status_code})")
-    except Exception as e:
-        log(f"Discord: feil ved sending ({e})")
-
-
-def write_pwa_assets():
-    """Skriv manifest, service worker og to ikoner (PWA-installasjon + offline)."""
-    manifest = {
-        "name": "MarketAnalyzor", "short_name": "Analysor",
-        "start_url": ".", "scope": ".", "display": "standalone",
-        "background_color": "#0b0d10", "theme_color": "#0b0d10",
-        "description": "Gull-relativt, regime-basert markeds-dashboard",
-        "icons": [
-            {"src": "icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any maskable"},
-            {"src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable"},
-        ],
-    }
-    (DOCS / "manifest.webmanifest").write_text(json.dumps(manifest), encoding="utf-8")
-
-    # Service worker: network-first for data (.json), cache-first for resten.
-    sw = """const CACHE = 'analysor-v5';
-const CORE = ['./','./index.html','./trend.html','./report.html','./roadmap.html','./portfolio.html','./backtest.html',
-  './lightweight-charts.standalone.production.js','./manifest.webmanifest'];
-self.addEventListener('install', e => {
-  e.waitUntil(caches.open(CACHE).then(c => c.addAll(CORE)).then(()=>self.skipWaiting()));
-});
-self.addEventListener('activate', e => {
-  e.waitUntil(caches.keys().then(ks => Promise.all(
-    ks.filter(k => k !== CACHE).map(k => caches.delete(k)))).then(()=>self.clients.claim()));
-});
-self.addEventListener('fetch', e => {
-  const url = e.request.url;
-  if (url.endsWith('.json')) {                       // data: network-first
-    e.respondWith(fetch(e.request).then(r => {
-      const cp = r.clone(); caches.open(CACHE).then(c => c.put(e.request, cp)); return r;
-    }).catch(() => caches.match(e.request)));
-  } else {                                           // shell: cache-first
-    e.respondWith(caches.match(e.request).then(r => r || fetch(e.request)));
-  }
-});
-"""
-    (DOCS / "sw.js").write_text(sw, encoding="utf-8")
-
-    # Ikoner: ren-Python PNG (ingen Pillow). Mørk bakgrunn + blå trekant (opp).
-    _write_icon_png(DOCS / "icon-192.png", 192)
-    _write_icon_png(DOCS / "icon-512.png", 512)
-    log("PWA-ressurser skrevet (manifest, sw.js, ikoner)")
-
-
-def _write_icon_png(path: Path, size: int):
-    """Skriv en enkel PNG uten eksterne biblioteker (zlib + struct + CRC)."""
-    import struct
-    import zlib
-    bg = (11, 13, 16)       # --bg
-    blue = (0, 114, 178)    # Okabe-Ito blå
-    cx = size / 2
-    # Trekant (pilspiss opp) sentrert
-    top_y, base_y = size * 0.26, size * 0.74
-    half = size * 0.26
-    rows = bytearray()
-    for y in range(size):
-        rows.append(0)  # filter-byte per rad
-        for x in range(size):
-            r, g, b = bg
-            if top_y <= y <= base_y:
-                frac = (y - top_y) / (base_y - top_y)
-                w = half * frac
-                if (cx - w) <= x <= (cx + w):
-                    r, g, b = blue
-            rows += bytes((r, g, b))
-
-    def chunk(tag, data):
-        c = struct.pack(">I", len(data)) + tag + data
-        return c + struct.pack(">I", zlib.crc32(tag + data) & 0xffffffff)
-
-    sig = b"\x89PNG\r\n\x1a\n"
-    ihdr = struct.pack(">IIBBBBB", size, size, 8, 2, 0, 0, 0)  # 8-bit RGB
-    idat = zlib.compress(bytes(rows), 9)
-    png = sig + chunk(b"IHDR", ihdr) + chunk(b"IDAT", idat) + chunk(b"IEND", b"")
-    path.write_bytes(png)
-
-
-if __name__ == "__main__":
-    main()
+# market-analysor
+
+Gull-relativt, regime-basert markeds-dashboard for personlig bruk. Etterfølgeren
+til `market-daily-report`, bygget på nytt med forbedringene fra forbedringsrapporten:
+ROC/momentum-signaler, risiko- og breddemetrikker, volatilitetsjustert
+posisjonsstørrelse, interaktive Lightweight Charts, colorblind-trygg palett, og
+hardere datatrygghet (CSP, selvhostede scripts, JSON-backup, valgfri kryptering).
+
+> **Ikke finansrådgivning.** Dette er ditt eget regelbaserte rammeverk for å lese
+> markedet. All analyse er relativ til gull (XAU) som baseline, etter
+> Northstar & Badcharts (Kevin Wadsworth) og NFTRH (Gary Tanashian).
+
+---
+
+## Hva er nytt vs market-daily-report
+
+| Område | Før (v8) | Nå (analysor) |
+|---|---|---|
+| Relativ styrke | 50MA-kryssing på ratio (krever 4–12 års historikk) | **Multi-horisont ROC/momentum** (1/3/6/12M) — fungerer for unge instrumenter |
+| Risiko | ingen | **Vol, max drawdown, Sharpe, Sortino** per instrument |
+| Bredde | ingen | **% over 50/200-dagers MA** for hele universet |
+| Posisjonsstørrelse | score-vektet | **Volatilitetsjustert** (invers-vol mot 12% mål) |
+| Regime | 2s10s, Fed | + **10y-3m spread, kredittspreader (HY OAS), samlet regime-score** |
+| Grafer | matplotlib-PNG (300+ filer) | **Lightweight Charts** (interaktive, ~35 KB, lazy-lastet) |
+| Farger | rød/grønn | **Okabe-Ito colorblind-trygg** (blå/oransje) + alltid ikon+tekst |
+| Datatrygghet | localStorage rå | **CSP, selvhostede scripts, JSON eksport/import, valgfri AES-GCM-kryptering** |
+| Portefølje | kr-kostbasis + daglig rebalansering | beholdt + risiko-KPI-er og vol-justert mål-vekt |
+| Leadership-visning | to tabeller | + **RRG-scatter** (RS-Ratio/RS-Momentum, rotasjonsgraf) |
+| Diversifisering | ingen | **Korrelasjonsmatrise** (252 dager, heatmap) |
+| Troverdighet | påstått | **Walk-forward backtest** (dual momentum + vol-skalering) vs SPY/gull |
+| Realavkastning | ingen | **Fire spor**: nominell NOK, real NOK (SSB KPI), USD, gull-unser + NOWA-excess |
+| Makro-dybde | 6 faktorer | + **realrente (TIPS), breakeven, G3-likviditet, panikk-regime** (D&M) |
+| Beslutning | spredt | **🎯 Beslutningsbilde** øverst: regime + tidslinje + endringer + dine posisjoner |
+| Alpha | momentum | + **value-tilt** (Asness) og **panikk-demper** (Daniel & Moskowitz) |
+| Automatisering | manuell | **paper-ledger** (regelen vs deg), **portfolio-synk**, **AI-morgenbrief** |
+| App | nettside | **PWA**: installerbar hjemskjerm + offline (service worker) |
+
+---
+
+## Repo-struktur
+
+```
+market-analysor/
+├── .github/workflows/analysor.yml   # daglig kjøring + deploy til gh-pages
+├── requirements.txt
+├── scripts/
+│   ├── build.py                     # hovedbygg (kjør denne)
+│   ├── backfill_history.py          # rekonstruerer score-historikk (valgfri)
+│   └── analysor/                    # Python-pakke
+│       ├── config.py                # instrument-univers, parametre, palett
+│       ├── data.py                  # yfinance-henting + resampling
+│       ├── indicators.py            # RSI/MACD/ROC + risikometrikker
+│       ├── scoring.py               # Northstar-score (0–100)
+│       ├── analytics.py             # leadership, sjanger, bredde, par, money flow, rotasjon
+│       ├── regime.py                # makro-regime (FRED)
+│       ├── backtest.py              # walk-forward backtest av rotasjonsregelen
+│       ├── layout.py                # delt HTML/CSS/CSP
+│       ├── render.py                # Trend-oversikt + Report + RRG + korrelasjon + Backtest
+│       └── portfolio.py             # Portefølje (klientside, kryptering, backup)
+└── docs/                            # genereres → deployes til gh-pages
+    ├── index.html                   # 📈 Trend-oversikt (+ RRG + korrelasjon)
+    ├── report.html                  # 📊 Market Daily Report
+    ├── portfolio.html               # 💼 Portefølje
+    ├── backtest.html                # 🧪 Backtest
+    ├── index.json                   # all data (minifisert)
+    └── lightweight-charts...js      # selvhostet (lastes ned i bygg)
+```
+
+---
+
+## Oppsett (samme mønster som market-daily-report)
+
+1. **Lag nytt repo** på GitHub, f.eks. `market-analysor`.
+2. **Last opp alle filene** i denne mappen (behold strukturen).
+3. **Settings → Pages**: sett Source = *Deploy from a branch*, branch = `gh-pages`, mappe = `/ (root)`.
+   (Branchen `gh-pages` opprettes automatisk første gang workflowen kjører.)
+4. **Settings → Secrets and variables → Actions**: legg til `FRED_API_KEY`
+   (gratis nøkkel fra https://fredaccount.stlouisfed.org/apikeys). Uten den
+   hoppes makro-regime-kortene over — alt annet virker.
+   Valgfritt: `DISCORD_WEBHOOK_URL` for push-varsel ved signalendringer
+   (Discord: Server Settings → Integrations → Webhooks → New Webhook → Copy URL).
+   Varselet sendes kun når noe faktisk flipper (sjanger, slår-gull, regime, bredde).
+   Valgfritt: `ANTHROPIC_API_KEY` for AI-generert norsk morgenbrief (Claude API).
+   Modell kan settes med `ANTHROPIC_MODEL` (default claude-haiku-4-5 — koster
+   brøkdeler av en øre per bygg). Briefen er strengt grunnet i beregnede signaler.
+5. **Actions-fanen**: kjør *Market Analysor* manuelt én gang (`Run workflow`,
+   force=true). Den bygger og deployer.
+6. Siden ligger på `https://<bruker>.github.io/market-analysor/`.
+
+Workflowen kjører deretter daglig 19:50 Oslo-tid.
+
+---
+
+## Kjøre lokalt
+
+```bash
+pip install -r requirements.txt
+python scripts/build.py          # skriver til docs/
+# åpne docs/index.html i nettleser (kjør en lokal server for at fetch skal virke):
+cd docs && python -m http.server 8000   # -> http://localhost:8000
+```
+
+> Merk: porteføljesiden bruker `localStorage` per nettleser/maskin. Bruk
+> **⬇ Eksporter backup** jevnlig — det er den viktigste beskyttelsen mot datatap.
+
+---
+
+## Metodikk kort
+
+**Slår gull / dollar.** Et instrument "slår" baseline hvis ratioen mot gull (eller
+dollar) har **positiv ROC på 1M eller 3M**. Momentum-basert, så det krever ikke
+lang historikk slik en 50MA-på-ratio gjorde.
+
+**Northstar-score (0–100).** Høyere = lavere risiko / bedre entry. Snitt av RSI,
+MACD-retning og MA-avstand over ukentlig/månedlig/kvartal.
+
+**Sjanger-rangering.** Sektor-score = % av medlemmene som slår både gull og dollar.
+≥70% = i medvind, ≤30% (dvs. 70%+ taper) = nedadgående, ellers avventende.
+
+**Portefølje (to trinn).** (1) Finn sektorer i medvind. (2) Innenfor dem, anbefal
+lavrisiko-entry-instrumenter etter score, med volatilitetsjustert mål-vekt. Posisjoner
+føres i kr kostbasis; verdien drifter daglig med kursen (kostbasis × dagens pris /
+inngangspris), så kake og andeler oppdateres automatisk.
+
+---
+
+## Viktige forbehold
+
+- **Backtest ≠ fremtid.** Scoren og rotasjonsregelen er ikke out-of-sample-validert
+  ennå (se rapportens Stage 3). Behandle alt som beslutnings*støtte*, ikke signaler
+  å handle mekanisk på. Momentum kan krasje hardt i skarpe vendinger etter bear-marked.
+- **Kryptering beskytter ikke mot XSS** i en kjørende side — den beskytter data i ro
+  (delt maskin). CSP + selvhostede scripts er forsvaret mot XSS. Ta backup uansett.
+- **50-perioders signaler** er erstattet med ROC nettopp fordi de krevde for lang
+  historikk; men ROC har egne svakheter (whipsaw i sidelengs marked). Les begge
+  tidsrammer (1M og 3M) sammen.
+
+## v5: Realavkastning, dyp makro, semi-automatisering
+
+**Realavkastning (fire spor).** Porteføljesiden viser nå avkastning i fire mål samtidig:
+nominell NOK, real NOK (deflatert med norsk KPI fra SSB), USD (uten valutaeffekt) og
+gull-unser. Pluss en NOWA-excess-linje (meravkastning mot NOK-cash). Krever ingen
+oppsett — henter SSB KPI (PxWebApi v2) og Norges Bank USDNOK/NOWA automatisk og gratis.
+SSB byttet KPI-tabell i 2026 (ny COICOP, basisår 2025=100); tabell-ID kan overstyres med
+miljøvariabelen `SSB_KPI_TABLE` hvis SSB endrer igjen.
+
+**Dyp makro.** Regimet har fått realrente (10y TIPS), inflasjonsforventning (10y breakeven),
+G3-sentralbanklikviditet (Fed+ECB+BoJ i USD) og et panikk-regime (Daniel & Moskowitz:
+bear + høy vol = momentum-krasj-fare). G3-likviditet hadde ~1 kvartals ledelse historisk,
+men brøt sammen 2023–25 — vektes deretter.
+
+**Beslutningsbilde.** Øverst på Trend-oversikt: samlet regime, momentum-regime, endringsteller,
+benchmark-snapshot (norsk KPI, US CPI, USDNOK, NOWA), en regime-tidslinje (fargestripe over
+tid), dine posisjoner som krever handling, og "regelen vs deg".
+
+**Paper-ledger ("regelen vs deg").** En hypotetisk portefølje som mekanisk følger
+rotasjonsregelen (momentum + value, månedlig rebalansering), verdsatt daglig i NOK. Speil
+for din egen disiplin. State i `docs/paper_ledger.json`.
+
+**Portefølje-synk.** "⬆ Synk til GitHub" laster ned `portfolio.json` du kan committe til
+`docs/`. Da ser det daglige bygget posisjonene dine og Discord-varselet kan si "SPY: SKALER AV".
+NB: `docs/` er offentlig — posisjonene blir synlige. Hopp over hvis du vil holde dem private.
+
+**AI-morgenbrief.** Med `ANTHROPIC_API_KEY` skriver Claude en ~200-ords norsk kommentar i
+hvert bygg, strengt grunnet i de beregnede tallene (ingen egne tall, sier "ukjent" ved
+manglende data). Degraderer til ingenting uten nøkkel.
+
+**PWA.** Siden er nå installerbar på hjemskjerm (manifest + ikoner) og fungerer offline
+(service worker: network-first for data, cache-first for resten). Push krever server, så
+Discord forblir varselkanalen.
+
+> Verdiavhengige forbehold: backtest ≠ fremtid; dual momentum gir nedsidebeskyttelse, ikke
+> bull-meravkastning; makro-relasjoner (særlig global likviditet) er ustabile; value-tilt og
+> panikk-demper er evidensbaserte men ingen garanti. **Ikke finansrådgivning.**
+
+## v6: NSBC-korrigert score, roadmaps og hit-rate-validering
+
+Denne versjonen retter opp den viktigste feilen og bygger to nye analyse-motorer,
+basert på et grundig studium av Northstar & Badcharts' egne dokumenter.
+
+**Korrigert NSBC-score (viktigst).** Den gamle scoren brukte RSI + MACD og belønnet
+*oversold* (lav RSI = "god entry") — stikk i strid med NSBCs metode. NSBC bruker
+**ikke MACD**. Deres faktiske system er en evidens-klynge: **12 & 36 SMA Trend
+Navigator** (over begge = bull), **Ichimoku-sky 9/26/52** (over sky = bull),
+**distance-fra-36MA** (0 = nøytral, +10 % = stretched/FOMO-sone), **Stochastic RSI**,
+og **breakout fra konsolidering**. NSBCs definisjon av lavrisiko-entry er: *«ikke
+stretched fra langtids-MA OG nettopp brutt ut av en base/konsolidering»*. Scoren
+teller nå tente bevis, straffer stretched pris hardt (FOMO = høy risiko, ikke lav),
+og skiller **langtidsregime (M/Q)** fra **korttidstiming (W)** — du kan være LT bull
+og KT bear samtidig. Daily Report viser nå LT/KT-tilstand, evidens-badges, breakout-
+og stretched-merker per instrument.
+
+**🗺️ Roadmaps-fane (ny).** Auto-genererte roadmaps i NSBC-stil for hele universet:
+support/resistance fra klustrede swing-pivoter, trend-kanal med R² (trend-kvalitet),
+mål via measured move (AB=CD) og Fibonacci-extension, og scenarioer (bull/base/bear)
+hver med et **invaliderings-nivå** («line in the sand»). Kan vises både nominelt og
+**priced-in-gold**. Bygget fra ukentlig OHLC.
+
+**📊 Hit-rate-validering (ny).** Fra akkumulert score-historikk: «når NSBC-score ≥ 70,
+hva ble fremtidig 1/3/6-måneders avkastning — og hvor ofte var den positiv?» Vises
+alltid mot **base-rate** (alle perioder); edge = differansen. Streng metodikk: ingen
+look-ahead, n vises alltid, n<20 flagges «lav tillit». Inkluderer en kvart-Kelly-
+guide som først aktiveres ved stort nok utvalg. Score-historikk lagres daglig i
+`docs/history/score_history.json` og bygger seg opp over tid.
+
+**🎯 Triage-visning (ny, øverst på Trend).** Én fusjonert handlingsliste: nye
+lavrisiko-entries (breakout + ikke stretched), FOMO-exit-kandidater (stretched fra
+36-MA), og dine posisjoner som krever handling — hver med roadmap-mål. «Hva bør jeg
+vurdere i dag» på én skjerm.
+
+Nye moduler: `roadmap.py`, `validation.py`. Omskrevet: `scoring.py` (NSBC-metode),
+`data.py` (OHLC for Ichimoku/S/R), `indicators.py` (Ichimoku, StochRSI, Trend
+Navigator, support/resistance, breakout). Ny fane i navigasjonen: 🗺️ Roadmaps.
+
+> Forbehold: NSBCs eksakte numeriske terskler (StochRSI-bånd, distance-bånd) er
+> medlemsinnhold — strukturen er gjengitt tro mot dokumentene, men båndverdiene er
+> parametre å kalibrere mot din egen validering. Hit-rate-databasen er ung; de fleste
+> tall er foreløpige i starten. **Ikke finansrådgivning.**
+
+## v7: Stage-analyse (fikser crypto-feilen), forklaringer i hver boks, SMA-avstand
+
+Denne versjonen retter feilen du fant og bygger forklaringssystemet.
+
+**Stage-analyse (Weinstein) — fikser "stretched"-feilen.** Den viktigste rettelsen:
+en lav score kunne før få etiketten "Høy risiko / stretched" selv om instrumentet var
+i NEDTREND (ikke strukket i det hele tatt). Nå klassifiseres hvert instrument i en
+Weinstein-fase: **Stage 1 basing, Stage 2 opptrend, Stage 3 distribusjon, Stage 4
+nedtrend**. Strukket/FOMO er nå korrekt en under-tilstand av Stage 2 (opptrend, men
+for langt over 36-MA) — aldri det samme som Stage 4 (nedtrend, under fallende MA).
+Crypto i nedtrend viser nå "Nedtrend (Stage 4)" med forklaring "ingen bullish bevis",
+ikke "stretched". Gjelder både enkeltinstrumenter og sektorscore.
+
+**Forklaring i hver boks.** Et nytt sentralt forklaringssystem (`glossary.py`) gir en
+kort klartekst under hver boks: hva betyr "Risk-on 80/100"? → "Makrobildet favoriserer
+risiko: flertallet av motorene er positive. Historisk medvind for aksjer/krypto." Hver
+makro-boks, score og nøkkeltall har nå en "hva betyr dette → hva bør jeg gjøre"-linje.
+
+**SMA-avstand med tidsramme.** Under hvert instrument i Daily Report vises nå avstand
+fra **både 12 og 36 MA, på både ukentlig og månedlig** — fargekodet (grønn over snitt,
+oransje strukket >+10%, rød under). Dette er NSBCs distance-gauge.
+
+**Alltid merket tidsramme.** Alle "over/under MA"-bobler oppgir nå tidsrammen eksplisitt
+("71% over 30-ukers MA (ukentlig)") — rapportkrav om at ingen boble skal stå uten
+tidsramme.
+
+**"Slår gull" verifisert + Mansfield RS.** Bekreftet at beats-gull bruker korrekt
+ratio-metode (ROC av pris/gull-forholdet, ikke differanse av to ROC-er). Lagt til
+**Mansfield relativ styrke** (ratio normalisert mot eget 52-ukers snitt) — NSBC-native
+nullinje-test. Vises ved siden av slår-gull.
+
+> Gjenstår fra rapporten (planlagt): indikatorer tegnet PÅ chartene (Ichimoku-sky, MA-er,
+> sub-paneler), roadmaps som annoterte charts, anbefalings-backtest ("hvis alle signaler
+> var fulgt"), flere instrumenter (sektorer, land, renter, faktorer, trend-sleeve), og
+> global bredde-måler. **Ikke finansrådgivning.**
+
+## v8: 62 instrumenter, indikatorer på charts, roadmap-charts, anbefalings-backtest
+
+Denne versjonen bygger ut de fire store ønskene.
+
+**Flere instrumenter (33 → 62).** Lagt til hele Select Sector SPDR-settet (XLK, XLF,
+XLV, XLI, XLY, XLP, XLU, XLB, XLRE, XLC), land/regioner (EWJ Japan, EWG Tyskland, EWU,
+EWC, EWA, EWZ Brasil, INDA India, FXI Kina), renter/kreditt (IEF, SHY, LQD, EMB, TIP,
+BIL), faktorer (MTUM, VLUE, QUAL, USMV) og en managed futures-trend-sleeve (DBMF). Alle
+store, likvide, lang historikk. Ny **global bredde-måler**: % av land+sektorer over
+200-dagers MA — et kjent regime-filter.
+
+**Northstar-indikatorer på chartene.** Daily Report-chartene tegner nå candlesticks +
+12 & 36 SMA (Trend Navigator) + Ichimoku-sky (9/26/52) — beregnet i pandas og sendt som
+serier (unngår risikabel v5-migrering av chart-biblioteket).
+
+**Roadmaps som tegnede charts.** Hver roadmap viser nå et annotert candlestick-chart med
+12/36 MA, støtte/motstand som prislinjer, og bull/base/bear-mål + invaliderings-nivå
+tegnet som horisontale linjer. Tall-detaljer er flyttet til en utvidbar seksjon
+(progressiv avsløring).
+
+**Anbefalings-backtest.** Ny seksjon på Backtest-fanen: «hvis alle NSBC-anbefalinger var
+fulgt». Rekonstruerer NSBC-scoren punkt-for-punkt historisk (ingen look-ahead), eier alle
+instrumenter i konstruktiv tilstand som slår gull 3M, og sammenligner mot kjøp-og-hold
+SPY/gull med tre ekvitykurver. Inkluderer ærlig verdikt (slår den SPY risikojustert eller
+ikke?) og et røkt-flagg hvis ytelsen er mistenkelig høy (mulig look-ahead).
+
+Ytelse: anbefalings-backtesten precomputer månedlige score-serier vektorisert (~3s i
+stedet for å re-score hver måned). index.json holdes liten ved å stripe chart-data
+(kun HTML-sidene embedder dem). Sidene gzipper godt (report ~300KB over nett).
+
+> Forbehold: anbefalings-backtesten er en SIMULERING av mekanisk fulgte signaler, ikke en
+> logg over faktiske handler — reell diskresjonær timing vil avvike. Den månedlige
+> score-proxyen i backtesten er litt forenklet vs. den fulle daglige NSBC-scoren (samme
+> ånd: 12&36 SMA + Ichimoku + ikke stretched). **Ikke finansrådgivning.**
+
+## v9: Ny "🎯 I dag"-landingsside med kommando-bånd og sorterbar leaderboard
+
+Denne versjonen strukturerer dataen i tre lag så det viktigste flagges øverst, mens
+alle detaljer fortsatt er tilgjengelige ved å bla eller bytte fane.
+
+**Ny default-fane "🎯 I dag".** Erstatter Trend-oversikt som landingsside (den gamle
+trend-siden ligger nå på trend.html, fortsatt med full dybde). Tre lag:
+
+*Lag 1 — Kommando-bånd (én skjerm):* én makro-verdikt-linje på toppen, så tre kolonner —
+**Kjøp-kandidater** (instrumenter i ekte lavrisiko-entry med sjanger- og makro-medvind),
+**Skaler av / unngå** (stretched FOMO eller Stage 4 nedtrend), og **Dine posisjoner**
+som krever handling. Svaret på "hva gjør jeg i dag" uten å bla.
+
+*Lag 2 — Sorterbar leaderboard:* hele universet (62 instrumenter) i ett rutenett. Klikk
+en hvilken som helst kolonne for å sortere — kompositt, score, stage, slår-gull,
+Mansfield, 3M-momentum, avstand-fra-36MA. Farget grønn→rød, med sparklines. Klikk
+symbol for å hoppe til detaljer i Daily Report.
+
+*Lag 3 — Detaljer:* per-instrument-charts, roadmaps, korrelasjon osv. ligger fortsatt på
+sine respektive faner, nå demotert under landingssiden.
+
+**Vekt-av-bevis-rangering (Northstar-filosofi).** Kompositt-scoren = NSBC-score ×
+sjanger-medvind × makro-regime. Et instrument flyter til toppen bare når DETS oppsett,
+DETS sjanger OG makrobildet alle peker samme vei. En sterk graf i en svak sjanger eller
+i risk-off-makro rabatteres deretter — akkurat slik Northstar vekter bevis på tvers av
+tidsrammer, sjanger og makro.
+
+Ny modul: `today.py` (rangerings-motoren). Sorteringen skjer klientside i ren JS (ingen
+rammeverk). Landingssiden er ~15KB gzipped. **Ikke finansrådgivning.**
+
+## v10: Money flow som førsteklasses signal
+
+Pengestrøm — hvor kapitalen faktisk strømmer — er nå et sentralt signal, ikke begravd.
+
+**Utvidet money flow (3 → 7 par).** La til syklisk vs defensiv (XLY/XLP), småselskaper
+vs store (IWM/SPY), kreditt vs stat (LQD/IEF) og halvleder-ledelse (SOXX/SPY) i tillegg
+til de eksisterende (kreditt-appetitt, kobber/gull, EM-ledelse). Samlet pengestrøm-verdikt
+(risk-on / blandet / risk-off) basert på hvor mange par som peker mot risiko vs trygghet.
+
+**Ny sektor-rotasjon.** Egen tabell som rangerer alle 11 sjangre på relativ momentum mot
+bredt marked (ACWI) — innstrømning øverst, utstrømning nederst, med ⚡ for akselererende
+strøm (1M leder 3M). Viser rotasjonsbildet på ett blikk.
+
+**Pengestrøm på I dag-siden.** Kommando-båndet har nå en egen pengestrøm-stripe: samlet
+retning + hvilke sektorer kapital strømmer INN i vs UT av. Verdikt-linjen nevner også
+pengestrøm-tilstanden. Slik ser du umiddelbart om trenden støttes av kapitalflyt.
+
+**Ikke finansrådgivning.**
+
+## v11: Historikk-bevaring + live anbefalings-portefølje
+
+To viktige ting: aldri miste historikk igjen, og spore anbefalingene framover.
+
+**Historikk nullstilles ikke lenger (kritisk feilretting).** Deploy-steget brukte en ren
+gh-pages-erstatning uten `keep_files` — hver kjøring som ikke klarte å hente forrige
+tilstand (nettverksglipp før deploy) skrev tomme historikk-filer som så ble permanente.
+Nå: (1) `keep_files: true` på deploy gjør gh-pages additiv, og (2) alle tilstandsfiler
+(score_history, paper_ledger, regime_history, recommendation_log) bruker et sentinel-
+vern: hvis forrige tilstand IKKE kunne hentes, hopper bygget over skrivingen i stedet for
+å overskrive med tomt. Dine synkede posisjoner og all historikk overlever nå.
+
+**Live anbefalings-portefølje (ny, på Backtest-fanen).** Skiller seg fra anbefalings-
+backtesten (som rekonstruerer fortiden): denne lagrer de FAKTISKE kjøp-anbefalingene fra
+«I dag»-siden hver dag og fører en likevektet portefølje som følger dem framover. Hver
+dag kjøpes nye anbefalinger, og de som faller ut selges; daglig verdsetting gir en
+ekvitykurve indeksert til 100 ved oppstart. Kurven bygger seg opp i sanntid etter hvert
+som anbefalingene kommer inn — så du ser hvordan det faktisk hadde gått å følge rådene.
+
+> Forenklet modell: likevektet, ingen transaksjonskostnad, daglig verdsetting. Kurven er
+> tom de første dagene og fylles ut etter hvert. **Ikke finansrådgivning.**
