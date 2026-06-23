@@ -1,839 +1,1410 @@
-#!/usr/bin/env python3
 """
-Hovedbygg for market-analysor.
-
-Kjører hele pipelinen:
-  1. Hent priser (yfinance) for alle instrumenter + NOK for TV-lenker
-  2. Beregn Northstar-score, risikometrikker, prisserier
-  3. Leadership ranking (ROC vs gull/dollar), sjanger-styrke, bredde, regime, par, money flow
-  4. Skriv index.json (minifisert) + tre HTML-sider (Lightweight Charts)
-  5. Last ned/­selvhost Lightweight Charts-biblioteket
-
-Kjør lokalt:  python scripts/build.py
-GitHub Actions kjører dette daglig og deployer docs/ til gh-pages.
+HTML-render for Trend-oversikt og Market Daily Report.
+Bruker Lightweight Charts (interaktivt) i stedet for matplotlib-PNG.
+Colorblind-trygg: blå=opp, vermillion=ned, oransje=avvent; alltid ikon+tekst.
 """
 from __future__ import annotations
+import html
 import json
-import os
-import sys
-from datetime import datetime, timezone, timedelta
-from pathlib import Path
-
-# Gjør pakken importerbar uansett arbeidskatalog
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-
-import pandas as pd  # noqa: E402
-import numpy as np  # noqa: E402
+from .config import PALETTE, tv_symbol
+from . import layout
+from . import glossary
+from .scoring import score_label
 
 
-def _json_default(o):
-    """Gjør numpy-typer (bool_, int64, float64) JSON-serialiserbare."""
-    if isinstance(o, (np.bool_,)):
-        return bool(o)
-    if isinstance(o, (np.integer,)):
-        return int(o)
-    if isinstance(o, (np.floating,)):
-        return float(o)
-    if isinstance(o, (np.ndarray,)):
-        return o.tolist()
-    raise TypeError(f"Object of type {o.__class__.__name__} is not JSON serializable")
-
-from analysor import config, data as datamod, scoring, analytics, regime as regimemod, render, portfolio, backtest as backtestmod, benchmarks as benchmarksmod, paper, roadmap as roadmapmod, validation as validationmod, today as todaymod  # noqa: E402
-from analysor.config import VERSION, PALETTE  # noqa: E402
-from analysor.layout import LWC_CDN, LWC_LOCAL  # noqa: E402
-from analysor import indicators as ind  # noqa: E402
-
-OSLO = timezone(timedelta(hours=2))
-NOW = datetime.now(OSLO)
-DOCS = Path(__file__).resolve().parent.parent / "docs"
-CHARTS_HISTORY_DAYS = 400  # antall dagspunkter i prisgrafen
+def _tv(sym, den=None):
+    s = tv_symbol(sym) + (f"/{tv_symbol(den)}" if den else "")
+    return f'https://www.tradingview.com/chart/?symbol={html.escape(s)}'
 
 
-def log(m):
-    print(m, flush=True)
+def _arrow(beats):
+    """Ikon + tekst, aldri farge alene (colorblind-trygt)."""
+    if beats is True:
+        return f'<span class="up">▲ Leder</span>'
+    if beats is False:
+        return f'<span class="down">▼ Taper</span>'
+    return '<span class="muted">— n/a</span>'
 
 
-def price_series_for_chart(df: pd.DataFrame, days: int = CHARTS_HISTORY_DAYS):
-    """[(YYYY-MM-DD, close)] for Lightweight Charts."""
-    c = df["close_use"].dropna().tail(days)
-    return [(idx.strftime("%Y-%m-%d"), round(float(v), 4)) for idx, v in c.items()]
+def _roc_cell(v):
+    if v is None:
+        return '<td class="muted">–</td>'
+    cls = "up" if v > 0 else "down"
+    sign = "+" if v >= 0 else ""
+    return f'<td class="{cls}" style="text-align:right">{sign}{v:.1f}%</td>'
 
 
-def chart_data_nsbc(df: pd.DataFrame, days: int = 350) -> dict:
-    """
-    Rik chart-data med NSBC-indikatorer (beregnet i pandas, sendt som serier):
-    candles (OHLC), 12 & 36 SMA, Ichimoku-sky (span A/B). Tegnes på ukentlig
-    oppløsning (NSBCs mellom-bilde). Payload-trimmet: ~70 uker, 2-3 desimaler.
-    """
-    import numpy as np
-    d = df.dropna(subset=["close_use"])
-    if len(d) < 60:
-        return {}
-    wk = pd.DataFrame()
-    wk["close"] = d["close_use"].resample("W-FRI").last()
-    wk["high"] = (d["high"] if "high" in d else d["close_use"]).resample("W-FRI").max()
-    wk["low"] = (d["low"] if "low" in d else d["close_use"]).resample("W-FRI").min()
-    wk["open"] = (d["open"] if "open" in d else d["close_use"]).resample("W-FRI").first()
-    wk = wk.dropna()
-    if len(wk) < 60:
-        return {}
-    weeks = min(len(wk), days // 5)
-    wk = wk.tail(weeks + 60)
+# ── Trend-oversikt ────────────────────────────────────────────────
+def render_today(data) -> str:
+    """🎯 I dag — landingssiden. Tre lag: kommando-bånd (én skjerm),
+    sorterbar leaderboard, og lenker til detaljer."""
+    P = layout.head("I dag", 0)
+    td = data.get("today", {})
+    out = [P, '<h1>🎯 I dag</h1>']
 
-    sma12 = wk["close"].rolling(12).mean()
-    sma36 = wk["close"].rolling(36).mean()
-    conv = (wk["high"].rolling(9).max() + wk["low"].rolling(9).min()) / 2
-    base = (wk["high"].rolling(26).max() + wk["low"].rolling(26).min()) / 2
-    span_a = ((conv + base) / 2)
-    span_b = (wk["high"].rolling(52).max() + wk["low"].rolling(52).min()) / 2
+    # ── LAG 1: Kommando-bånd ──────────────────────────────────────
+    macro_state = td.get("macro_state", "ukjent")
+    macro_score = td.get("macro_score")
+    mcol = (PALETTE["up"] if macro_state == "risk-on"
+            else PALETTE["down"] if macro_state == "risk-off" else PALETTE["warn"])
+    out.append('<section class="section" style="border:2px solid var(--accent)">')
+    out.append(f'<div style="font-size:16px;font-weight:700;margin-bottom:4px">'
+               f'Makro: <span style="color:{mcol}">{html.escape(macro_state)}'
+               f'{f" ({macro_score}/100)" if macro_score is not None else ""}</span></div>')
+    out.append(f'<p style="font-size:14px;line-height:1.5;margin:0 0 12px">{html.escape(td.get("verdict",""))}</p>')
 
-    # Adaptiv presisjon: små priser (ratioer) trenger flere desimaler
-    lastv = float(wk["close"].iloc[-1])
-    nd = 2 if lastv >= 10 else (4 if lastv >= 0.1 else 6)
+    # Pengestrøm-stripe: retning + hvor kapital strømmer inn/ut
+    flow = td.get("flow", {})
+    if flow.get("state"):
+        fcol = flow.get("col", PALETTE["warn"])
+        inflow = flow.get("inflow", [])
+        outflow = flow.get("outflow", [])
+        in_s = ", ".join(f'{html.escape(f["sector"])} ({f["roc_3m"]:+.0f}%{"⚡" if f.get("accel") else ""})'
+                         for f in inflow) or "ingen klar"
+        out_s = ", ".join(f'{html.escape(f["sector"])} ({f["roc_3m"]:+.0f}%)' for f in outflow) or "ingen klar"
+        out.append(f'<div style="background:var(--panel2);border-radius:8px;padding:10px 12px;margin-bottom:12px">'
+                   f'<div style="font-weight:700;color:{fcol};margin-bottom:4px">💧 Pengestrøm: {html.escape(flow["state"])}</div>'
+                   f'<div style="font-size:12.5px;line-height:1.6">'
+                   f'<span style="color:{PALETTE["up"]}">▲ Inn:</span> {in_s}<br>'
+                   f'<span style="color:{PALETTE["down"]}">▼ Ut:</span> {out_s}</div></div>')
 
-    def ser(s):
-        s = s.dropna().tail(weeks)
-        return [(idx.strftime("%y-%m-%d"), round(float(v), nd)) for idx, v in s.items()]
+    # Tre kolonner: kjøp / skaler av / dine posisjoner
+    out.append('<div class="today-cols">')
 
-    def candle_ser():
-        out = []
-        for idx, row in wk.tail(weeks).iterrows():
-            out.append({"t": idx.strftime("%y-%m-%d"),
-                        "o": round(float(row["open"]), nd), "h": round(float(row["high"]), nd),
-                        "l": round(float(row["low"]), nd), "c": round(float(row["close"]), nd)})
-        return out
+    # Kjøp-kandidater
+    buys = td.get("buys", [])
+    out.append(f'<div class="today-col"><h3 style="color:{PALETTE["up"]};margin-top:0">▲ Kjøp-kandidater</h3>')
+    if buys:
+        for b in buys:
+            out.append(f'<div class="today-item"><a href="report.html#{b["id"]}" style="font-weight:700;color:var(--text);text-decoration:none">{html.escape(b["sym"])}</a> '
+                       f'<span class="pill" style="background:{PALETTE["up"]}22;color:{PALETTE["up"]}">{b["score"]}</span>'
+                       f'<div class="muted" style="font-size:11px">{html.escape(b.get("why",""))} · {html.escape(b.get("sector",""))}</div></div>')
+    else:
+        out.append('<p class="muted" style="font-size:12px">Ingen kvalifiserte i lavrisiko-entry nå. Tålmodighet.</p>')
+    out.append('</div>')
 
-    return {
-        "candles": candle_ser(),
-        "sma12": ser(sma12), "sma36": ser(sma36),
-        "cloud_a": ser(span_a), "cloud_b": ser(span_b),
-    }
+    # Skaler av / unngå
+    avoids = td.get("avoids", [])
+    out.append(f'<div class="today-col"><h3 style="color:{PALETTE["down"]};margin-top:0">▼ Skaler av / unngå</h3>')
+    if avoids:
+        for av in avoids:
+            ac = PALETTE["warn"] if av.get("stage") == 2 else PALETTE["down"]
+            out.append(f'<div class="today-item"><a href="report.html#{av["id"]}" style="font-weight:700;color:var(--text);text-decoration:none">{html.escape(av["sym"])}</a> '
+                       f'<div class="muted" style="font-size:11px;color:{ac}">{html.escape(av.get("reason",""))}</div></div>')
+    else:
+        out.append('<p class="muted" style="font-size:12px">Ingen stretched/nedtrend-varsler nå.</p>')
+    out.append('</div>')
 
-
-def main():
-    DOCS.mkdir(parents=True, exist_ok=True)
-    (DOCS / "charts").mkdir(exist_ok=True)
-    force = os.environ.get("FORCE_RUN", "").lower() in ("1", "true", "yes")
-    log(f"market-analysor {VERSION} — start {NOW.isoformat()} (force={force})")
-
-    meta_list = config.all_instruments()
-    assets_meta = {m["id"]: m for m in meta_list}
-
-    # 1. Hent priser
-    raw = {}
-    for m in meta_list:
-        log(f"Henter {m['id']}...")
-        df, resolved = datamod.fetch_one(m["candidates"])
-        if df is None:
-            log(f"  MANGLER: {m['id']}")
-            continue
-        raw[m["id"]] = df
-    # NOK for TV-lenker/rotasjon (ikke et scoret instrument)
-    nok_df, _ = datamod.fetch_one(["NOK=X"])
-    if nok_df is not None:
-        raw["NOK"] = nok_df
-
-    # 2. Score + risiko + prisserie per instrument
-    assets = {}
-    gld = raw.get("GLD")
-    for m in meta_list:
-        iid = m["id"]
-        a = {
-            "id": iid, "display_name": m["label"], "symbol_label": m["symbol_label"],
-            "sector": m["sector"], "subclass": m["subclass"],
-            "category_title": m["category_title"],
-        }
-        df = raw.get(iid)
-        if df is None:
-            a["missing_data"] = True
-            assets[iid] = a
-            continue
-        frames = datamod.resample_frames(df)
-        score, meta = scoring.nsbc_score(frames)
-        a["northstar_score"] = score
-        a["missing_data"] = False
-        a["price_last"] = round(float(df["close_use"].iloc[-1]), 4)
-        a["price_series"] = price_series_for_chart(df)
-        a["chart_nsbc"] = chart_data_nsbc(df)
-        a["risk"] = ind.risk_metrics(df["close_use"], config.RISK_LOOKBACK_DAYS, config.RISK_FREE_ANNUAL)
-        # NSBC-tilstand: langtid (regime) × korttid (timing) + evidens
-        a["lt_state"] = meta.get("long_term")
-        a["st_state"] = meta.get("short_term")
-        a["evidence"] = meta.get("evidence", [])
-        a["ticks"] = meta.get("ticks", 0)
-        a["stretched"] = meta.get("stretched", False)
-        a["breakout"] = meta.get("breakout", False)
-        a["dist36_w"] = meta.get("dist36")
-        a["state_label"] = scoring.state_label(meta.get("long_term"), meta.get("short_term"))
-        a["stage"] = meta.get("stage")
-        a["stage_label"] = meta.get("stage_label")
-        a["stage_reason"] = meta.get("stage_reason")
-        wf = meta.get("frames", {}).get("weekly", {})
-        qf = meta.get("frames", {}).get("quarterly", {})
-        mf = meta.get("frames", {}).get("monthly", {})
-        # Avstand fra 12 & 36 MA på ukentlig OG månedlig (NSBC distance-gauge)
-        a["dist_w"] = {"d12": wf.get("dist12"), "d36": wf.get("dist36")}
-        a["dist_m"] = {"d12": mf.get("dist12"), "d36": mf.get("dist36")}
-        # porteføljens overkjøpt/stretched-sjekk bruker nå NSBC-evidens
-        a["rsi_q"] = qf.get("srsi_k")
-        a["overbought_w"] = bool(wf.get("srsi_overbought"))
-        a["stretched_w"] = bool(wf.get("stretched"))
-        # sektor-trend: over 12&36 MA (ukentlig) = NSBC bull-gate
-        a["close_above_sma50_w"] = wf.get("above_both_ma")
-        # slår gull (ROC 1M/3M)
-        if gld is not None and iid != "GLD":
-            b = ind.beats_baseline(df["close_use"], gld["close_use"],
-                                   config.BEATS_ROC_HORIZONS, config.ROC_HORIZONS)
-            a["gold_beat"] = ({"beats": b["beats"], "tf_over": b["tf_over"],
-                               "mansfield": b.get("mansfield"),
-                               "roc3m": (b.get("roc") or {}).get("3M")}
-                              if b["beats"] is not None else None)
+    # Dine posisjoner
+    uv = data.get("user_portfolio")
+    out.append(f'<div class="today-col"><h3 style="margin-top:0">💼 Dine posisjoner</h3>')
+    if uv and uv.get("rows"):
+        actions = [r for r in uv["rows"] if r["verdict"] in ("SKALER AV", "VURDER SKALER AV")]
+        if actions:
+            for r in actions:
+                rc = PALETTE["down"] if r["verdict"] == "SKALER AV" else PALETTE["warn"]
+                out.append(f'<div class="today-item"><span style="font-weight:700">{html.escape(r["sym"])}</span> '
+                           f'<span style="color:{rc};font-size:11px">{html.escape(r["verdict"])}</span>'
+                           f'<div class="muted" style="font-size:11px">{html.escape(r.get("why",""))} · {r["pnl_pct"]:+.1f}%</div></div>')
         else:
-            a["gold_beat"] = None
-        assets[iid] = a
-        log(f"  OK {iid}: score={score}")
+            out.append(f'<p class="muted" style="font-size:12px">Ingen posisjoner krever handling. '
+                       f'Total {uv.get("total_nok",0):,.0f} kr.</p>')
+    else:
+        out.append('<p class="muted" style="font-size:12px">Synk porteføljen din for å se posisjons-varsler her.</p>')
+    out.append('</div>')
 
-    # 3. Sektorscore + trend (weekly 50MA)
-    sector_summary = {}
-    sec_scores = {}
+    out.append('</div></section>')
+
+    # ── LAG 2: Sorterbar leaderboard ──────────────────────────────
+    lb = td.get("leaderboard", [])
+    out.append('<section class="section"><h2>📊 Leaderboard — hele universet</h2>'
+               '<p class="sub">Klikk en kolonne for å sortere. <strong>Kompositt</strong> = '
+               'NSBC-score × sjanger-medvind × makro (vekt-av-bevis): et instrument flyter til '
+               'toppen bare når oppsett, sjanger OG makro peker samme vei. '
+               'Grønn = sterk, rød = svak. Klikk symbol for detaljer.</p>')
+    out.append(_leaderboard_table(lb))
+    out.append('</section>')
+
+    out.append('<p class="sub" style="margin-top:16px">Mer detaljer: '
+               '<a href="trend.html">Trend-oversikt</a> · '
+               '<a href="report.html">Daily Report</a> · '
+               '<a href="roadmap.html">Roadmaps</a></p>')
+    out.append(layout.foot())
+    return "".join(out)
+
+
+def _leaderboard_table(lb) -> str:
+    """Sorterbar HTML-tabell. Sortering gjøres klientside i JS."""
+    if not lb:
+        return '<p class="muted">Ingen data.</p>'
+    import json as _json
+    head_cols = [
+        ("composite", "Kompositt"), ("sym", "Symbol"), ("score", "Score"),
+        ("stage", "Stage"), ("trend", "LT/KT"), ("beats", "Slår gull"),
+        ("mansfield", "Mansfield"), ("roc3m", "3M %"), ("dist36", "Fra 36-MA"),
+        ("sector", "Sjanger"),
+    ]
+    th = "".join(f'<th data-k="{k}" style="cursor:pointer;user-select:none">{lbl} <span class="sort-ar"></span></th>'
+                 for k, lbl in head_cols)
+    return (f'<div style="overflow-x:auto"><table id="lbTable" class="lb"><thead><tr>{th}</tr></thead>'
+            f'<tbody></tbody></table></div>'
+            f'<script>const LB={_json.dumps(lb)};{_leaderboard_js()}</script>')
+
+
+def _leaderboard_js() -> str:
+    return r"""
+(function(){
+  let sortK='composite', sortDir=-1;
+  const tb=document.querySelector('#lbTable tbody');
+  const upC='#009E73',downC='#D55E00',warnC='#E69F00',mutC='#7d8a99';
+  function scoreColor(s){ if(s>=70)return upC; if(s>=55)return '#56B4E9'; if(s>=40)return warnC; return downC; }
+  function stageLabel(st){ return {1:'1 Basing',2:'2 Opptrend',3:'3 Distrib.',4:'4 Nedtrend'}[st]||'–'; }
+  function stageColor(st){ return {1:'#56B4E9',2:upC,3:warnC,4:downC}[st]||mutC; }
+  function spark(arr){ if(!arr||arr.length<2)return ''; const w=60,h=18,mn=Math.min(...arr),mx=Math.max(...arr);
+    const rng=(mx-mn)||1; const pts=arr.map((v,i)=>`${(i/(arr.length-1)*w).toFixed(1)},${(h-(v-mn)/rng*h).toFixed(1)}`).join(' ');
+    const up=arr[arr.length-1]>=arr[0]; return `<svg width="${w}" height="${h}" style="vertical-align:middle"><polyline points="${pts}" fill="none" stroke="${up?upC:downC}" stroke-width="1.3"/></svg>`; }
+  function cell(v,c){ return `<td style="${c||''}">${v}</td>`; }
+  function render(){
+    const rows=[...LB].sort((a,b)=>{ let x=a[sortK],y=b[sortK];
+      if(sortK==='sym'||sortK==='sector'){ x=(x||'');y=(y||''); return sortDir*x.localeCompare(y); }
+      if(sortK==='trend'){ x=(a.lt||'')+(a.kt||'');y=(b.lt||'')+(b.kt||''); return sortDir*x.localeCompare(y); }
+      if(sortK==='beats'){ x=a.beats_gold?1:0;y=b.beats_gold?1:0; }
+      x=(x==null?-9999:x); y=(y==null?-9999:y); return sortDir*(x-y); });
+    tb.innerHTML=rows.map(r=>{
+      const tr=v=>v==null?'<span style="color:'+mutC+'">–</span>':v;
+      const sb=v=>({'bull':'<span style="color:'+upC+'">bull</span>','bear':'<span style="color:'+downC+'">bear</span>'}[v]||'<span style="color:'+mutC+'">nøy</span>');
+      const beats=r.beats_gold==null?tr(null):(r.beats_gold?'<span style="color:'+upC+'">▲ ja</span>':'<span style="color:'+downC+'">▼ nei</span>');
+      const mans=r.mansfield==null?tr(null):`<span style="color:${r.mansfield>0?upC:downC}">${r.mansfield>0?'+':''}${r.mansfield}</span>`;
+      const roc=r.roc3m==null?tr(null):`<span style="color:${r.roc3m>=0?upC:downC}">${r.roc3m>=0?'+':''}${r.roc3m.toFixed(1)}%</span>`;
+      const dist=r.dist36==null?tr(null):`<span style="color:${r.dist36>=10?warnC:(r.dist36>=0?upC:downC)}">${r.dist36>=0?'+':''}${r.dist36.toFixed(1)}%</span>`;
+      return `<tr>
+        <td style="font-weight:700;color:${scoreColor(r.composite)}">${r.composite} ${spark(r.spark)}</td>
+        <td><a href="report.html#${r.id}" style="color:var(--text);font-weight:600;text-decoration:none">${r.sym}</a></td>
+        <td style="color:${scoreColor(r.score)};font-weight:600">${r.score}</td>
+        <td style="color:${stageColor(r.stage)};font-size:12px">${stageLabel(r.stage)}</td>
+        <td style="font-size:11px">${sb(r.lt)}/${sb(r.kt)}</td>
+        ${cell(beats)}${cell(mans)}${cell(roc)}${cell(dist)}
+        <td class="muted" style="font-size:11px">${r.sector||''}</td></tr>`;
+    }).join('');
+    document.querySelectorAll('#lbTable th').forEach(th=>{
+      const ar=th.querySelector('.sort-ar'); if(ar) ar.textContent = th.dataset.k===sortK?(sortDir<0?'▼':'▲'):''; });
+  }
+  document.querySelectorAll('#lbTable th').forEach(th=>{
+    th.addEventListener('click',()=>{ const k=th.dataset.k;
+      if(k===sortK) sortDir*=-1; else { sortK=k; sortDir=(k==='sym'||k==='sector')?1:-1; }
+      render(); }); });
+  render();
+})();
+"""
+
+
+def render_trend(data) -> str:
+    P = layout.head("Trend-oversikt", 1)
+    out = [P, '<h1>📈 Trend-oversikt</h1>',
+           '<p class="sub">All analyse er relativ til gull (XAU) som baseline. '
+           'Relativ styrke måles med <strong>ROC/momentum</strong> på ratioen, ikke MA-kryssing — '
+           'det krever ikke lang historikk og snur raskere.</p>']
+
+    # 🎯 DAGENS BESLUTNINGSBILDE — alt du trenger på én skjerm
+    out.append(_decision_dashboard(data))
+
+    # 🤖 AI-morgenbrief (valgfri, grunnet i signalene)
+    brief = data.get("ai_brief")
+    if brief and brief.get("text"):
+        out.append('<section class="section">'
+                   '<h2>🤖 Morgenbrief</h2>'
+                   f'<p style="font-size:14px;line-height:1.6">{html.escape(brief["text"])}</p>'
+                   f'<p class="sub" style="margin-top:6px">Generert av {html.escape(brief.get("model","AI"))} '
+                   'fra dagens beregnede signaler. Kan inneholde feil — ikke finansrådgivning.</p>'
+                   '</section>')
+
+    # 🔔 Hva endret seg siden forrige bygg (diff av signaler)
+    changes = data.get("changes") or []
+    if changes:
+        out.append('<section class="section" style="border-color:var(--accent)">'
+                   '<h2>🔔 Endringer siden forrige bygg</h2>'
+                   '<p class="sub">Signal-flips oppdaget av generatoren — det eneste du '
+                   'trenger å vurdere i dag. Sendes også til Discord hvis webhook er satt.</p>')
+        for c in changes:
+            cls = "up" if c.startswith("▲") else ("down" if c.startswith("▼") else "warn")
+            out.append(f'<div class="{cls}" style="padding:4px 0;font-weight:600;font-size:14px">{html.escape(c)}</div>')
+        out.append('</section>')
+
+    # 🎯 Triage: hva bør jeg vurdere i dag (én handlingsliste)
+    out.append(_triage_view(data))
+
+    # Regime-stripe
+    reg = data.get("regime", {})
+    out.append('<section class="section"><h2>Makro-regime</h2>'
+               '<p class="sub">NFTRH-kontekst: renteregime, likviditet (net + global), realrente, '
+               'kredittspreader, finansielle forhold og geopolitikk. '
+               'Regime-score = andel risk-on-faktorer.</p>')
+    if not reg:
+        out.append('<div class="sc" style="border-color:#E69F0055">'
+                   '<div class="sc-name warn">⚠ Makro-regime mangler data</div>'
+                   '<div class="sc-label muted">Krever <strong>FRED_API_KEY</strong> som repo-secret '
+                   '(gratis nøkkel fra fredaccount.stlouisfed.org/apikeys). '
+                   'Legg den til i Settings → Secrets → Actions og kjør workflowen på nytt.</div></div>')
+    else:
+        out.append('<div class="sector-grid">')
+        comp = reg.get("composite")
+        if comp:
+            out.append(_regime_card("Samlet regime", comp.get("label"), comp.get("col"),
+                                    comp.get("state", ""), "regime_composite"))
+        ex_keys = {"yield_curve": "yield_curve", "net_liquidity": "net_liquidity",
+                   "global_liquidity": "global_liquidity", "real_rate": "real_rate",
+                   "breakeven": "breakeven", "nfci": "nfci", "credit_spread": "credit_spread",
+                   "panic": "panic", "gpr": "gpr"}
+        for key, title in [("yield_curve", "Yield-kurve 2s10s"), ("term_spread_10y3m", "10y-3m spread"),
+                           ("net_liquidity", "Net liquidity (WALCL−TGA−RRP)"),
+                           ("global_liquidity", "G3-likviditet (Fed+ECB+BoJ)"),
+                           ("real_rate", "Realrente 10y (TIPS)"), ("breakeven", "Inflasjonsforv. 10y"),
+                           ("fed_liquidity", "Fed-likviditet"), ("credit_spread", "Kredittspread"),
+                           ("nfci", "NFCI (Chicago Fed)"), ("panic", "Momentum-regime"),
+                           ("gpr", "Geopolitisk risiko (GPR)")]:
+            r = reg.get(key)
+            if r:
+                out.append(_regime_card(title, r.get("label"), r.get("col"), r.get("note", ""),
+                                        ex_keys.get(key)))
+        out.append('</div>')
+        # Samlet forklaring av regimet i klartekst
+        if comp:
+            out.append(f'<div class="explain" style="margin-top:8px"><span class="ex-what">'
+                       f'{html.escape(glossary.regime_one_liner(comp.get("score")))}</span></div>')
+    out.append('</section>')
+
+    # Markedsbredde (flyttet opp – overordnet markedstilstand først)
+    br = data.get("breadth", {})
+    gb = data.get("global_breadth", {})
+    if br:
+        out.append('<section class="section"><h2>📐 Markedsbredde</h2>'
+                   '<p class="sub">Andel av universet over 50- og 200-dagers MA (daglig). '
+                   'Bred deltakelse bekrefter trend; smal bredde varsler svekkelse.</p>'
+                   '<div class="sector-grid">')
+        for ma in (50, 200):
+            v = br.get(f"pct_over_{ma}ma")
+            n = br.get(f"n_{ma}ma", 0)
+            col = PALETTE["up"] if (v or 0) >= 50 else PALETTE["down"]
+            icon = "▲" if (v or 0) >= 50 else "▼"
+            out.append(f'<div class="sc"><div class="sc-name">Over {ma}-dagers MA (daglig)</div>'
+                       f'<div class="sc-score" style="color:{col}">{icon} {v if v is not None else "–"}%</div>'
+                       f'<div class="sc-label muted">{n} instrumenter</div></div>')
+        # Global bredde (land + sektorer over 200d)
+        if gb and gb.get("pct_over_200d") is not None:
+            out.append(f'<div class="sc" style="border-color:{gb["col"]}55">'
+                       f'<div class="sc-name">Global bredde: land+sektorer over 200-dagers MA (daglig)</div>'
+                       f'<div class="sc-score" style="color:{gb["col"]}">{gb["pct_over_200d"]}%</div>'
+                       f'<div class="sc-label" style="color:{gb["col"]}">{html.escape(gb["state"])} · {gb["over"]}/{gb["n"]}</div></div>')
+        out.append('</div>')
+        out.append(glossary.box("breadth"))
+        out.append('</section>')
+
+    # Money flow (flyttet opp)
+    mf = data.get("money_flow", {})
+    pairs = mf.get("pairs", []) if isinstance(mf, dict) else (mf or [])
+    if pairs:
+        verdict = ""
+        if isinstance(mf, dict) and mf.get("state"):
+            verdict = (f'<div class="explain" style="margin-bottom:10px;border-left-color:{mf["col"]}">'
+                       f'<span class="ex-what" style="color:{mf["col"]};font-weight:700">Pengestrøm: {html.escape(mf["state"])}</span> '
+                       f'<span class="ex-do">{html.escape(mf.get("note",""))}</span></div>')
+        out.append('<section class="section"><h2>💧 Money flow &amp; likviditet</h2>'
+                   '<p class="sub">Hvor strømmer kapitalen — risikovillig vs trygg havn. '
+                   '3M/1M = ROC av forholdstallet; Over 50MA = ratio over 50-dagers snitt (daglig). '
+                   'Risk-on krever begge positive.</p>'
+                   + verdict + '<div class="sector-grid">')
+        for f in pairs:
+            o = f.get("over_50ma")
+            ostr = "▲ over 50MA (daglig)" if o else ("▼ under 50MA (daglig)" if o is False else "50MA: n/a")
+            r3 = f.get("roc_3m")
+            r3s = f"{r3:+.1f}% 3M" if r3 is not None else "n/a"
+            out.append(f'<div class="sc" style="border-color:{f["col"]}55">'
+                       f'<div class="sc-name">{html.escape(f["label"])}</div>'
+                       f'<div style="font-size:15px;font-weight:700;color:{f["col"]}">{html.escape(f["state"])} ({r3s})</div>'
+                       f'<div class="sc-label" style="color:{f["col"]}">{ostr}</div>'
+                       f'<div class="sc-label muted">{html.escape(f["note"])}</div></div>')
+        out.append('</div>')
+        out.append(glossary.box("money_flow"))
+        out.append('</section>')
+
+    # Sektor-rotasjon: hvor strømmer pengene på sjanger-nivå
+    sf = data.get("sector_flow", {})
+    flows = sf.get("flows", []) if isinstance(sf, dict) else []
+    if flows:
+        out.append('<section class="section"><h2>🔀 Sektor-rotasjon — hvor strømmer pengene</h2>'
+                   f'<p class="sub">Hver sektor målt på relativ momentum mot bredt marked '
+                   f'({html.escape(sf.get("baseline","ACWI"))}), priced relativt. Innstrømning øverst, '
+                   'utstrømning nederst. ⚡ = akselererende (1M leder 3M).</p>'
+                   '<table><thead><tr><th>Sektor</th><th>Retning</th>'
+                   '<th style="text-align:right">1M</th><th style="text-align:right">3M</th></tr></thead><tbody>')
+        for f in flows:
+            r1 = f.get("roc_1m"); r3 = f.get("roc_3m")
+            accel = " ⚡" if f.get("accel") else ""
+            out.append(f'<tr><td><strong>{html.escape(f["display"])}</strong>{accel}</td>'
+                       f'<td style="color:{f["col"]};font-weight:600">{html.escape(f["dir"])}</td>'
+                       f'<td style="text-align:right;color:{f["col"]}">{r1:+.1f}%</td>'
+                       f'<td style="text-align:right;color:{f["col"]};font-weight:600">{r3:+.1f}%</td></tr>')
+        out.append('</tbody></table></section>')
+
+    # Kapitalrotasjon
+    rot = data.get("rotation")
+    if rot:
+        out.append('<section class="section"><h2>Kapitalrotasjon — hovedinstrumenter vs gull</h2>'
+                   f'<p class="sub">{html.escape(rot["note"])} '
+                   'Slår gull = positiv ROC på 1M eller 3M. Klikk for ratioen i TradingView.</p>')
+        out.append(f'<p style="font-size:15px;font-weight:700;color:{rot["col"]}">{html.escape(rot["label"])}</p>')
+        out.append('<div style="margin:6px 0">')
+        for grp, beat in [("beats", True), ("loses", False)]:
+            items = rot.get(grp, [])
+            lab = "Slår gull" if beat else "Taper mot gull"
+            icon = "▲" if beat else "▼"
+            cls = "up" if beat else "down"
+            chips = []
+            for it in items:
+                tf = "+".join(it.get("tf_over", [])) or ("" if beat else "—")
+                chips.append(f'<a class="chip" href="{_tv(it["sym"],"GLD")}" target="_blank" rel="noopener">'
+                             f'{html.escape(it["sym"])}<span class="chip-tf">{tf}</span> 📊</a>')
+            out.append(f'<div style="margin:6px 0"><span class="{cls}" style="font-weight:600;font-size:13px">'
+                       f'{icon} {lab}:</span> {" ".join(chips) or "<span class=muted>ingen</span>"}</div>')
+        out.append('</div></section>')
+
+    # Leadership ranking (vs gull + vs dollar)
+    out.append('<section class="section"><h2>🏆 Leadership ranking (relativ styrke)</h2>'
+               '<p class="sub">Sykliske instrumenter rangert etter vektet ROC mot gull og dollar. '
+               '<strong>Leder %</strong> = hvor mye ratioen har steget (3M ROC) — altså hvor kraftig '
+               'det slår, ikke bare at det slår.</p>'
+               '<div class="grid grid2">')
+    out.append(_ranking_table(data.get("ranking_gold", {}), "🥇 vs Gull (GLD)", "GLD"))
+    out.append(_ranking_table(data.get("ranking_dxy", {}), "💵 vs Dollar (UUP)", "UUP"))
+    out.append('</div></section>')
+
+    # RRG-scatter (leadership som rotasjonsgraf)
+    out.append(_rrg_section(data.get("rrg", {})))
+
+    # Korrelasjonsmatrise
+    out.append(_corr_section(data.get("correlation", {})))
+
+    # Sykliske par
+    cp = data.get("cyclical_pairs", [])
+    if cp:
+        out.append('<section class="section"><h2>⚖️ Sykliske par (intern rotasjon)</h2>'
+                   '<p class="sub">Instrument vs instrument — hvem leder innad. Composite = vektet ROC.</p>'
+                   '<table><thead><tr><th>Par</th><th style="text-align:right">1M</th>'
+                   '<th style="text-align:right">3M</th><th>Leder</th></tr></thead><tbody>')
+        for p in cp:
+            comp = p.get("composite") or 0
+            leader = p["a"] if comp > 0 else p["b"]
+            lcls = "up" if comp > 0 else "down"
+            out.append(f'<tr><td><strong>{html.escape(p["label"])}</strong> '
+                       f'<span class="muted">{html.escape(p["a"])}/{html.escape(p["b"])}</span></td>'
+                       f'{_roc_cell(p.get("roc_1m"))}{_roc_cell(p.get("roc_3m"))}'
+                       f'<td class="{lcls}">{html.escape(leader)}</td></tr>')
+        out.append('</tbody></table></section>')
+
+    # 📊 Hit-rate-validering (treffsikkerhet over tid)
+    out.append(_hitrate_section(data.get("validation", {})))
+
+    out.append(layout.foot())
+    return "".join(out)
+
+
+def _triage_view(data) -> str:
+    """🎯 Hva bør jeg vurdere i dag — én fusjonert handlingsliste.
+    Nye lavrisiko-entries, stretched/FOMO-exit-kandidater, og dine posisjoner."""
+    assets = data.get("assets", {})
+    uv = data.get("user_portfolio")
+    roadmaps = data.get("roadmaps", {})
+
+    entries, exits, holds_action = [], [], []
     for iid, a in assets.items():
         if a.get("missing_data"):
             continue
-        sec_scores.setdefault(a["sector"], []).append(iid)
-    for sec, iids in sec_scores.items():
-        vals = [assets[i]["northstar_score"] for i in iids]
-        avg = round(sum(vals) / len(vals), 1)
-        over = sum(1 for i in iids if assets[i].get("close_above_sma50_w") is True)
-        tot = sum(1 for i in iids if assets[i].get("close_above_sma50_w") is not None)
-        pct_over = round(over / tot * 100) if tot else None
-        # Aggreger stage: hvor mange medlemmer i nedtrend (Stage 4) vs opptrend (Stage 2)
-        stages = [assets[i].get("stage") for i in iids if assets[i].get("stage")]
-        n_down = sum(1 for s in stages if s == 4)
-        n_up = sum(1 for s in stages if s == 2)
-        n_stretch = sum(1 for i in iids if assets[i].get("stretched"))
-        if tot and over / tot >= 0.5:
-            ttxt, tcol = f"Opptrend — {pct_over}% over 30-ukers MA (ukentlig)", PALETTE["up"]
-        elif tot:
-            ttxt, tcol = f"Svak — bare {pct_over}% over 30-ukers MA (ukentlig)", PALETTE["warn"]
-        else:
-            ttxt, tcol = "Ingen data", PALETTE["neutral"]
-        # KORRIGERT etikett: skiller nedtrend fra strukket på sektornivå
-        if stages and n_down >= len(stages) * 0.5:
-            lab, scol = "Nedtrend (Stage 4)", PALETTE["down"]
-        elif n_stretch >= max(1, len(iids) * 0.5):
-            lab, scol = "Strukket (FOMO-sone)", PALETTE["warn"]
-        else:
-            lab, scol = scoring.score_label(int(round(avg)))
-        # Plain-language forklaring i boksen
-        if lab.startswith("Nedtrend"):
-            explain = (f"{n_down} av {len(iids)} instrumenter er i nedtrend (under fallende 12&36-MA). "
-                       "Lav score = ingen bullish bevis, IKKE strukket. Unngå nye kjøp; vent på base.")
-        elif lab.startswith("Strukket"):
-            explain = ("Sektoren er i opptrend, men flere medlemmer er strukket fra 36-MA (FOMO-sone). "
-                       "Eiere kan holde; nye kjøp har høy risiko. Vent på tilbaketrekk/konsolidering.")
-        elif avg >= 70:
-            explain = "Flere medlemmer i ekte lavrisiko-entry (over trend, ikke strukket, bryter ut)."
-        else:
-            explain = (f"Snittscore {avg}/100 over ukentlig/månedlig/kvartal. "
-                       f"{n_up} i opptrend, {n_down} i nedtrend. Se enkeltinstrumenter for detaljer.")
-        sector_summary[sec] = {
-            "display": "Råvarer" if sec == "Rawarer" else sec,
-            "avg_score": avg, "label": lab, "score_col": scol,
-            "trend_txt": ttxt, "trend_col": tcol,
-            "over_ma50": over, "total_ma50": tot, "pct_over": pct_over, "n": len(iids),
-            "n_down": n_down, "n_up": n_up, "explain": explain,
-        }
+        sc = a.get("northstar_score", 0)
+        sym = a.get("symbol_label", iid)
+        # Nye lavrisiko-entries: høy score + breakout + ikke stretched + LT konstruktiv
+        if sc >= 70 and a.get("breakout") and not a.get("stretched"):
+            entries.append((sc, sym, iid, a.get("state_label", "")))
+        # Exit-kandidater: stretched i FOMO-sonen
+        if a.get("stretched") and a.get("st_state") != "bear":
+            exits.append((a.get("dist36_w") or 0, sym, iid))
 
-    # 4. Analyselag
-    ranking_gold = analytics.build_ranking(raw, "GLD", "Gull (GLD)", assets_meta)
-    ranking_dxy = analytics.build_ranking(raw, "UUP", "Dollar (UUP)", assets_meta)
-    genres = analytics.genre_strength(raw, assets_meta)
-    universe = [m["id"] for m in meta_list if not assets.get(m["id"], {}).get("missing_data")]
-    breadth = analytics.breadth(raw, universe)
-    glob_breadth = analytics.global_breadth(raw, config.BREADTH_GLOBAL_IDS)
-    pairs = analytics.cyclical_pairs(raw)
-    flow = analytics.money_flow(raw)
-    sec_flow = analytics.sector_flow(raw, assets_meta)
-    rot = analytics.rotation(raw, assets_meta)
-    rrg = analytics.build_rrg(raw, assets_meta)
-    corr = analytics.build_correlation(raw)
-    bt = backtestmod.run_backtest(raw, config.CYCLICAL_IDS, top_n=5)
-    # Anbefalings-backtest: "hvis alle NSBC-anbefalinger var fulgt"
-    rec_bt = backtestmod.run_recommendation_backtest(raw, config.CYCLICAL_IDS)
-    # Auto-roadmaps (NSBC-stil) for hele universet
-    roadmaps = roadmapmod.build_all_roadmaps(raw, assets_meta, gld=raw.get("GLD"))
-    # Hit-rate-validering fra score-historikk
-    score_hist = load_score_history()
-    validation = validationmod.forward_returns(raw, raw.get("GLD"), score_hist)
-    reg = regimemod.build_regime(os.environ.get("FRED_API_KEY", ""))
-    # Panikk-tilstand (Daniel & Moskowitz) inn i regimet
-    pstate = analytics.panic_state(raw)
-    if pstate:
-        reg["panic"] = pstate
-
-    # Benchmarks: norsk KPI (SSB), USDNOK/NOWA (Norges Bank), US CPI, gull
-    bench = benchmarksmod.build_benchmarks(
-        raw, regimemod.fetch_fred_series, os.environ.get("FRED_API_KEY", ""))
-
-    # Regime-historikk: append dagens composite-score -> tidslinje-stripe
-    today = NOW.strftime("%Y-%m-%d")
-    rhist_prev = load_prev_json("regime_history.json", fail_sentinel=True)
-    if rhist_prev is _FETCH_FAILED:
-        log("  ADVARSEL: regime_history kunne ikke hentes — hopper over skriving for å bevare historikk.")
-        rhist = {"dates": [], "scores": [], "states": []}  # kun for modellen; fila røres ikke
-    else:
-        rhist = rhist_prev or {"dates": [], "scores": [], "states": []}
-        comp = reg.get("composite") or {}
-        if comp.get("score") is not None and (not rhist["dates"] or rhist["dates"][-1] != today):
-            rhist["dates"].append(today)
-            rhist["scores"].append(comp["score"])
-            rhist["states"].append(comp.get("state", ""))
-            for k in ("dates", "scores", "states"):
-                rhist[k] = rhist[k][-365:]
-        with open(DOCS / "regime_history.json", "w", encoding="utf-8") as f:
-            json.dump(rhist, f, separators=(",", ":"), default=_json_default)
-
-    # Paper-ledger ("regelen vs deg") + brukerens synkede portefølje
-    usdnok_now = (round(float(raw["NOK"]["close_use"].iloc[-1]), 4)
-                  if raw.get("NOK") is not None else None)
-    prev_ledger = load_prev_json("paper_ledger.json", fail_sentinel=True)
-    if prev_ledger is _FETCH_FAILED:
-        log("  ADVARSEL: paper_ledger kunne ikke hentes — hopper over skriving for å bevare historikk.")
-        ledger = paper.update_paper_ledger(None, raw, config.CYCLICAL_IDS, usdnok_now, today)
-        user_pf_raw = load_user_portfolio()
-        user_val = paper.value_user_portfolio(user_pf_raw, raw, usdnok_now, assets)
-    else:
-        ledger = paper.update_paper_ledger(
-            prev_ledger, raw, config.CYCLICAL_IDS, usdnok_now, today)
-        user_pf_raw = load_user_portfolio()
-        user_val = paper.value_user_portfolio(user_pf_raw, raw, usdnok_now, assets)
-        if user_val:
-            ledger["actual_curve"] = (ledger.get("actual_curve") or [])[-730:]
-            if not ledger["actual_curve"] or ledger["actual_curve"][-1][0] != today:
-                ledger["actual_curve"].append((today, user_val["total_nok"]))
-        with open(DOCS / "paper_ledger.json", "w", encoding="utf-8") as f:
-            json.dump(ledger, f, separators=(",", ":"), default=_json_default)
-
-    # 5. Samlet datamodell
-    today_data = todaymod.build_today(assets, genres, reg, sector_summary,
-                                      user_portfolio=user_val, roadmaps=roadmaps,
-                                      money_flow=flow, sector_flow=sec_flow)
-    # Live anbefalings-logg: akkumulerer faktiske anbefalinger fremover
-    rec_log = append_recommendation_log(today_data, assets, usdnok_now)
-    model = {
-        "version": VERSION,
-        "generated_local": NOW.isoformat(),
-        "today": today_data,
-        "rec_log": rec_log,
-        "assets": assets,
-        "sector_summary": sector_summary,
-        "ranking_gold": ranking_gold,
-        "ranking_dxy": ranking_dxy,
-        "genre_strength": genres,
-        "breadth": breadth,
-        "global_breadth": glob_breadth,
-        "cyclical_pairs": pairs,
-        "money_flow": flow,
-        "sector_flow": sec_flow,
-        "rotation": rot,
-        "rrg": rrg,
-        "correlation": corr,
-        "backtest": bt,
-        "rec_backtest": rec_bt,
-        "roadmaps": roadmaps,
-        "validation": validation,
-        "regime": reg,
-        "benchmarks": bench,
-        "regime_history": rhist,
-        "paper": {"curve": ledger.get("curve", [])[-400:],
-                  "actual_curve": ledger.get("actual_curve", [])[-400:],
-                  "events": ledger.get("events", [])[-6:],
-                  "positions": sorted(ledger.get("positions", {}).keys()),
-                  "start_nok": ledger.get("start_nok")},
-        "user_portfolio": user_val,
-        "notes": {"instrument_count": len(universe)},
-        "usdnok": (round(float(raw["NOK"]["close_use"].iloc[-1]), 4)
-                   if raw.get("NOK") is not None else None),
-    }
-
-    # 5b. Signal-snapshot + diff mot forrige bygg + Discord-varsel
-    snapshot = signals_snapshot(model)
-    prev = load_prev_signals()
-    changes = compute_changes(prev, snapshot)
-    model["changes"] = changes
-    with open(DOCS / "signals.json", "w", encoding="utf-8") as f:
-        json.dump(snapshot, f, ensure_ascii=False, separators=(",", ":"), default=_json_default)
-    log(f"signals.json skrevet ({len(changes)} endringer siden forrige bygg)")
-    notify_discord(changes, user_val)
-
-    # 5c. Append dagens NSBC-scorer til historikk (for hit-rate-validering)
-    append_score_history(assets)
-
-    # AI-morgenbrief (valgfri, krever ANTHROPIC_API_KEY) — strengt grunnet
-    # i beregnede signaler, aldri egne tall.
-    model["ai_brief"] = build_ai_brief(model)
-
-    # 6. Skriv index.json (minifisert). Strip tunge chart-data — trend-siden
-    # rendrer ikke per-instrument-charts, og report/roadmap-sidene embedder
-    # sine egne chart-data direkte i HTML. Dette holder index.json liten.
-    import copy as _copy
-    slim = dict(model)
-    slim_assets = {}
-    for iid, a in model.get("assets", {}).items():
-        a2 = {k: v for k, v in a.items() if k not in ("chart_nsbc", "price_series")}
-        slim_assets[iid] = a2
-    slim["assets"] = slim_assets
-    # Roadmaps: dropp candle-arrays fra index.json (kun HTML trenger dem)
-    slim_rm = {}
-    for iid, entry in model.get("roadmaps", {}).items():
-        e2 = {}
-        for variant, rm in entry.items():
-            if isinstance(rm, dict):
-                e2[variant] = {k: v for k, v in rm.items() if k != "chart"}
-            else:
-                e2[variant] = rm
-        slim_rm[iid] = e2
-    slim["roadmaps"] = slim_rm
-    with open(DOCS / "index.json", "w", encoding="utf-8") as f:
-        json.dump(slim, f, ensure_ascii=False, separators=(",", ":"), default=_json_default)
-    log(f"index.json skrevet ({(DOCS/'index.json').stat().st_size} bytes)")
-
-    # 7. HTML-sider
-    (DOCS / "index.html").write_text(render.render_today(model), encoding="utf-8")
-    (DOCS / "trend.html").write_text(render.render_trend(model), encoding="utf-8")
-    (DOCS / "report.html").write_text(render.render_report(model), encoding="utf-8")
-    (DOCS / "roadmap.html").write_text(render.render_roadmap(model), encoding="utf-8")
-    (DOCS / "portfolio.html").write_text(portfolio.render_portfolio(model), encoding="utf-8")
-    (DOCS / "backtest.html").write_text(render.render_backtest(model), encoding="utf-8")
-    log("HTML-sider skrevet")
-
-    # 8. Selvhost Lightweight Charts (last ned hvis mangler)
-    ensure_lwc()
-
-    # 8b. PWA-ressurser (manifest, service worker, ikoner) — installerbar
-    # hjemskjerm + offline. Push krever server -> Discord forblir varselkanal.
-    write_pwa_assets()
-
-    # 9. .nojekyll så GitHub Pages ikke prosesserer
-    (DOCS / ".nojekyll").write_text("", encoding="utf-8")
-
-    log(f"FERDIG — {len(universe)} instrumenter, versjon={VERSION}")
-
-
-def ensure_lwc():
-    """Last ned Lightweight Charts til docs/ for selvhosting (én gang)."""
-    dest = DOCS / LWC_LOCAL
-    if dest.exists() and dest.stat().st_size > 50000:
-        log("Lightweight Charts allerede selvhostet")
-        return
-    try:
-        import urllib.request
-        log("Laster ned Lightweight Charts for selvhosting...")
-        urllib.request.urlretrieve(LWC_CDN, dest)
-        log(f"  lagret {dest.stat().st_size} bytes")
-    except Exception as e:
-        log(f"  ADVARSEL: klarte ikke laste ned LWC ({e}). Grafer vil ikke vises før filen finnes.")
-
-
-# ── Signal-diff + Discord-varsling ───────────────────────────────
-def signals_snapshot(model: dict) -> dict:
-    """Kompakt snapshot av dagens signaler for diff mot neste bygg."""
-    snap = {"date": NOW.strftime("%Y-%m-%d")}
-    snap["genres"] = {g["genre"]: g["state"] for g in model.get("genre_strength", [])}
-    snap["gold_beat"] = {
-        iid: (a.get("gold_beat") or {}).get("beats")
-        for iid, a in model.get("assets", {}).items()
-        if not a.get("missing_data") and a.get("gold_beat") is not None
-    }
-    rot = model.get("rotation") or {}
-    snap["rotation_beats"] = sorted(x["id"] for x in rot.get("beats", []))
-    comp = (model.get("regime") or {}).get("composite") or {}
-    snap["regime_state"] = comp.get("state")
-    br = model.get("breadth") or {}
-    snap["breadth50"] = br.get("pct_over_50ma")
-    return snap
-
-
-def append_recommendation_log(today_data, assets, usdnok_now):
-    """
-    LIVE anbefalings-logg: lagrer faktiske kjøp-anbefalinger fra I dag-siden hver
-    dag, og fører en portefølje som FØLGER anbefalingene fra og med i dag. Dette er
-    forskjellig fra den historiske anbefalings-backtesten (som rekonstruerer fortiden):
-    denne akkumulerer ekte anbefalinger fremover, så kurven vokser etter hvert.
-
-    Modell: likevektet i alle aktive kjøp-anbefalinger. Når et instrument faller ut
-    av anbefalingene, selges det. Daglig verdsetting -> ekvitykurve.
-    Beskyttet mot historikk-tap på samme måte som score_history (sentinel).
-    """
-    log_prev = load_prev_json("history/recommendation_log.json", fail_sentinel=True)
-    if log_prev is _FETCH_FAILED:
-        log("  ADVARSEL: recommendation_log kunne ikke hentes — hopper over skriving "
-            "for å bevare anbefalings-historikk.")
-        return None
-    rlog = log_prev if isinstance(log_prev, dict) else {}
-    rlog.setdefault("inception", NOW.strftime("%Y-%m-%d"))
-    rlog.setdefault("curve", [])          # [(dato, indeksert verdi)]
-    rlog.setdefault("holdings", {})       # iid -> {entry_date, entry_price}
-    rlog.setdefault("events", [])         # logg over kjøp/salg
-    rlog.setdefault("closed", [])         # avsluttede handler m/ avkastning
-
-    today = NOW.strftime("%Y-%m-%d")
-    buys = {b["id"] for b in today_data.get("buys", [])}
-
-    def price(iid):
-        a = assets.get(iid, {})
-        ps = a.get("price_series") or []
-        return ps[-1][1] if ps else None
-
-    held = rlog["holdings"]
-    # Selg det som ikke lenger anbefales
-    for iid in list(held.keys()):
-        if iid not in buys:
-            p_now = price(iid)
-            ent = held[iid]
-            if p_now and ent.get("entry_price"):
-                ret = p_now / ent["entry_price"] - 1
-                rlog["closed"].append({"id": iid, "entry": ent["entry_date"],
-                                       "exit": today, "ret_pct": round(ret * 100, 1)})
-            rlog["events"].append({"date": today, "action": "SELG", "id": iid})
-            held.pop(iid, None)
-    # Kjøp nye anbefalinger
-    for iid in buys:
-        if iid not in held:
-            p = price(iid)
-            if p:
-                held[iid] = {"entry_date": today, "entry_price": p}
-                rlog["events"].append({"date": today, "action": "KJØP", "id": iid})
-
-    # Daglig porteføljeverdi indeksert til 100 ved inception.
-    prev_prices = rlog.get("_last_prices", {})
-    rets = []
-    cur_prices = {}
-    for iid in held:
-        p = price(iid)
-        if p is None:
-            continue
-        cur_prices[iid] = p
-        pp = prev_prices.get(iid)
-        if pp and pp > 0:
-            rets.append(p / pp - 1)
-    day_ret = sum(rets) / len(rets) if rets else 0.0
-    last_val = rlog["curve"][-1][1] if rlog["curve"] else 100.0
-    new_val = last_val * (1 + day_ret)
-    if rlog["curve"] and rlog["curve"][-1][0] == today:
-        rlog["curve"][-1] = [today, round(new_val, 3)]
-    else:
-        rlog["curve"].append([today, round(new_val, 3)])
-    rlog["curve"] = rlog["curve"][-1095:]
-    rlog["_last_prices"] = cur_prices
-    rlog["events"] = rlog["events"][-200:]
-    rlog["closed"] = rlog["closed"][-200:]
-
-    hdir = DOCS / "history"
-    hdir.mkdir(parents=True, exist_ok=True)
-    with open(hdir / "recommendation_log.json", "w", encoding="utf-8") as f:
-        json.dump(rlog, f, separators=(",", ":"), default=_json_default)
-    log(f"recommendation_log.json: {len(rlog['curve'])} dager, {len(held)} aktive posisjoner")
-    return {
-        "inception": rlog["inception"],
-        "curve": rlog["curve"],
-        "active": sorted(held.keys()),
-        "n_active": len(held),
-        "recent_events": rlog["events"][-10:],
-        "closed": rlog["closed"][-10:],
-    }
-
-
-def load_score_history():
-    """Score-historikk (snapshots) for hit-rate-validering. _FETCH_FAILED ved nettverksfeil."""
-    hist = load_prev_json("history/score_history.json", fail_sentinel=True)
-    if hist is _FETCH_FAILED:
-        return _FETCH_FAILED
-    return hist if isinstance(hist, dict) else {}
-
-
-def append_score_history(assets: dict):
-    """Append dagens scorer til docs/history/score_history.json (en per dag).
-    Hvis forrige historikk ikke kunne hentes, IKKE skriv tomt — la gh-pages-fila
-    overleve (keep_files: true). Beskytter mot at historikk nullstilles."""
-    hist = load_score_history()
-    if hist is _FETCH_FAILED:
-        log("  ADVARSEL: kunne ikke hente score_history — hopper over skriving "
-            "for å bevare eksisterende historikk på gh-pages.")
-        return
-    today = NOW.strftime("%Y-%m-%d")
-    row = {iid: a["northstar_score"] for iid, a in assets.items()
-           if not a.get("missing_data") and a.get("northstar_score") is not None}
-    row["_real"] = True
-    hist[today] = row
-    keys = sorted(hist.keys())
-    if len(keys) > 520:
-        for k in keys[:-520]:
-            hist.pop(k, None)
-    hdir = DOCS / "history"
-    hdir.mkdir(parents=True, exist_ok=True)
-    with open(hdir / "score_history.json", "w", encoding="utf-8") as f:
-        json.dump(hist, f, separators=(",", ":"), default=_json_default)
-    log(f"score_history.json: {len(hist)} datoer")
-
-
-_FETCH_FAILED = object()  # sentinel: forrige tilstand kunne IKKE hentes (≠ tom)
-
-
-def load_prev_json(name: str, fail_sentinel: bool = False):
-    """
-    Hent en JSON-fil fra forrige bygg: lokal docs/<name>, ellers gh-pages rå-URL.
-
-    Returnerer None hvis fila genuint ikke finnes (første kjøring).
-    Hvis fail_sentinel=True OG et nettverkskall mislyktes, returneres _FETCH_FAILED
-    slik at kalleren kan la være å overskrive eksisterende historikk med tomt innhold.
-    """
-    local = DOCS / name
-    if local.exists():
-        try:
-            return json.loads(local.read_text(encoding="utf-8"))
-        except Exception:
-            pass
-    repo = os.environ.get("GITHUB_REPOSITORY", "")
-    if repo:
-        try:
-            import requests
-            url = f"https://raw.githubusercontent.com/{repo}/gh-pages/{name}"
-            r = requests.get(url, timeout=20)
-            if r.status_code == 200:
-                return r.json()
-            if r.status_code == 404:
-                return None  # finnes genuint ikke ennå
-            # annen status (5xx, rate-limit osv.) = usikkert -> ikke ødelegg historikk
-            log(f"  {name}: HTTP {r.status_code} ved henting av forrige tilstand")
-            return _FETCH_FAILED if fail_sentinel else None
-        except Exception as e:
-            log(f"  klarte ikke hente forrige {name}: {e}")
-            return _FETCH_FAILED if fail_sentinel else None
-    return None
-
-
-def load_prev_signals() -> dict | None:
-    """Forrige byggs signaler (spesialtilfelle av load_prev_json)."""
-    return load_prev_json("signals.json")
-
-
-def load_user_portfolio() -> dict | None:
-    """
-    Brukerens synkede portefølje fra docs/portfolio.json (committet via
-    eksport-knappen på porteføljesiden). Leses kun fra repoet (main-branch
-    checkout under bygg) — aldri fra klienten. Mangler den, kjøres alt uten.
-    """
-    p = DOCS.parent / "docs" / "portfolio.json"
-    # docs/portfolio.json ligger i repoet (ikke generert) -> sjekk repo-roten
-    candidates = [DOCS / "portfolio.json", Path(__file__).resolve().parent.parent / "docs" / "portfolio.json"]
-    for c in candidates:
-        if c.exists():
-            try:
-                return json.loads(c.read_text(encoding="utf-8"))
-            except Exception:
-                pass
-    return None
-
-
-def build_ai_brief(model: dict) -> dict | None:
-    """
-    AI-morgenbrief på norsk (~150-220 ord), strengt grunnet i beregnede signaler.
-    Krever ANTHROPIC_API_KEY. Modell via ANTHROPIC_MODEL (default haiku).
-    Degraderer til None uten nøkkel eller ved enhver feil.
-    """
-    key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
-    if not key:
-        log("AI-brief: ingen ANTHROPIC_API_KEY (hopper over)")
-        return None
-    try:
-        import requests
-        reg = model.get("regime", {})
-        comp = reg.get("composite", {})
-        # Kompakt, FAKTISK signal-subsett — modellen får KUN disse tallene
-        facts = {
-            "regime": {"state": comp.get("state"), "score": comp.get("score"),
-                       "kort": {k: v.get("label") for k, v in reg.items()
-                                if isinstance(v, dict) and "label" in v}},
-            "endringer": model.get("changes", []),
-            "ledere_mot_gull": [r["label"] for r in model.get("ranking_gold", {}).get("rows", [])[:5]
-                                if r.get("beats")],
-            "sjangrer_medvind": [g["genre"] for g in model.get("genre_strength", [])
-                                 if g.get("medvind")],
-            "bredde_50": model.get("breadth", {}).get("pct_over_50ma"),
-            "paper_vs_start": {
-                "start": model.get("paper", {}).get("start_nok"),
-                "naa": (model.get("paper", {}).get("curve") or [[None, None]])[-1][1]},
-        }
-        sys_prompt = (
-            "Du er en nøktern norsk markedsanalytiker. Skriv en morgenbrief på 150-220 ord "
-            "basert UTELUKKENDE på de oppgitte tallene. Ikke finn på tall, priser eller "
-            "hendelser. Si 'ukjent' hvis noe mangler. Vev regime, endringer, ledere mot gull "
-            "og bredde til en sammenhengende tekst. Avslutt med 'Ikke finansrådgivning.' "
-            "Ingen punktlister, kun prosa.")
-        payload = {
-            "model": os.environ.get("ANTHROPIC_MODEL", "claude-haiku-4-5"),
-            "max_tokens": 600,
-            "system": sys_prompt,
-            "messages": [{"role": "user",
-                          "content": "Signaler i dag (JSON):\n" + json.dumps(facts, ensure_ascii=False)}],
-        }
-        r = requests.post("https://api.anthropic.com/v1/messages",
-                          headers={"x-api-key": key, "anthropic-version": "2023-06-01",
-                                   "content-type": "application/json"},
-                          json=payload, timeout=40)
-        if r.status_code != 200:
-            log(f"AI-brief: API {r.status_code} (hopper over)")
-            return None
-        text = "".join(b.get("text", "") for b in r.json().get("content", [])
-                       if b.get("type") == "text").strip()
-        if not text:
-            return None
-        log(f"AI-brief: generert ({len(text)} tegn)")
-        return {"text": text, "model": payload["model"], "date": NOW.strftime("%Y-%m-%d")}
-    except Exception as e:
-        log(f"AI-brief: feil ({e})")
-        return None
-
-
-def compute_changes(prev: dict | None, cur: dict) -> list:
-    """Menneskelesbare endringer siden forrige bygg (norsk)."""
-    if not prev:
-        return []
-    ch = []
-    pg, cg = prev.get("genres", {}), cur.get("genres", {})
-    for genre, state in cg.items():
-        old = pg.get(genre)
-        if old is not None and old != state:
-            icon = "▲" if state == "I medvind" else ("▼" if state == "Nedadgående" else "•")
-            ch.append(f"{icon} Sjanger {genre}: {old} → {state}")
-    pb, cb = prev.get("gold_beat", {}), cur.get("gold_beat", {})
-    flipped_up = [i for i, v in cb.items() if v is True and pb.get(i) is False]
-    flipped_dn = [i for i, v in cb.items() if v is False and pb.get(i) is True]
-    if flipped_up:
-        ch.append("▲ Slår gull nå: " + ", ".join(sorted(flipped_up)))
-    if flipped_dn:
-        ch.append("▼ Taper mot gull nå: " + ", ".join(sorted(flipped_dn)))
-    if prev.get("regime_state") and cur.get("regime_state") and \
-            prev["regime_state"] != cur["regime_state"]:
-        ch.append(f"⚠ Regime: {prev['regime_state']} → {cur['regime_state']}")
-    p50, c50 = prev.get("breadth50"), cur.get("breadth50")
-    if p50 is not None and c50 is not None:
-        if p50 >= 50 > c50:
-            ch.append(f"▼ Bredde under 50% (over 50d-MA: {p50}% → {c50}%)")
-        elif p50 < 50 <= c50:
-            ch.append(f"▲ Bredde over 50% (over 50d-MA: {p50}% → {c50}%)")
-    return ch
-
-
-def notify_discord(changes: list, user_val: dict | None = None):
-    """Send endringer + dine posisjons-verdikter til Discord (DISCORD_WEBHOOK_URL)."""
-    url = os.environ.get("DISCORD_WEBHOOK_URL", "").strip()
-    if not url:
-        log("Discord: ingen webhook satt (hopper over)")
-        return
-    # Posisjoner som krever handling (SKALER AV / VURDER SKALER AV)
-    action_lines = []
-    if user_val:
-        for r in user_val.get("rows", []):
+    # Dine posisjoner som krever handling
+    if uv and uv.get("rows"):
+        for r in uv["rows"]:
             if r["verdict"] in ("SKALER AV", "VURDER SKALER AV"):
-                action_lines.append(f"• {r['sym']}: {r['verdict']} ({r['why']})")
-    if not changes and not action_lines:
-        log("Discord: ingen endringer å varsle")
-        return
-    try:
-        import requests
-        body = "**📊 Market Analysor — " + NOW.strftime("%d.%m.%Y") + "**\n"
-        if changes:
-            body += "\n".join(changes)
-        if action_lines:
-            body += "\n\n**Dine posisjoner:**\n" + "\n".join(action_lines)
-        repo = os.environ.get("GITHUB_REPOSITORY", "")
-        if repo:
-            owner, name = repo.split("/", 1)
-            body += f"\n<https://{owner}.github.io/{name}/>"
-        r = requests.post(url, json={"content": body[:1950]}, timeout=20)
-        log(f"Discord: varsel sendt ({r.status_code})")
-    except Exception as e:
-        log(f"Discord: feil ved sending ({e})")
+                holds_action.append(r)
+
+    if not (entries or exits or holds_action):
+        return ('<section class="section"><h2>🎯 Hva bør jeg vurdere i dag</h2>'
+                '<p class="sub">Ingen nye lavrisiko-entries, FOMO-exit-kandidater eller '
+                'posisjons-varsler akkurat nå. Tålmodighet er en posisjon.</p></section>')
+
+    parts = ['<section class="section" style="border:2px solid var(--good)">'
+             '<h2>🎯 Hva bør jeg vurdere i dag</h2>'
+             '<p class="sub">Fusjonert handlingsliste: nye lavrisiko-entries (NSBC: breakout + '
+             'ikke stretched), FOMO-exit-kandidater, og dine posisjoner. '
+             'Hver rad lenker til roadmap-nivåene. <strong>Ikke finansrådgivning.</strong></p>']
+
+    if entries:
+        entries.sort(reverse=True)
+        parts.append(f'<h3 style="color:{PALETTE["up"]};margin-top:8px">▲ Nye lavrisiko-entries</h3>')
+        for sc, sym, iid, state in entries[:8]:
+            rm = roadmaps.get(iid, {}).get("nominal", {})
+            tgt = ""
+            if rm and rm.get("scenarios", {}).get("base", {}).get("target"):
+                b = rm["scenarios"]["base"]
+                pct = b.get("pct")
+                pct_s = f' ({pct:+.0f}%)' if isinstance(pct, (int, float)) else ""
+                tgt = f' <span class="muted">base-mål {b["target"]:g}{pct_s}</span>'
+            parts.append(f'<div style="padding:3px 0"><strong>{html.escape(sym)}</strong> '
+                         f'<span class="pill" style="background:{PALETTE["up"]}22;color:{PALETTE["up"]}">score {sc}</span> '
+                         f'<span class="muted" style="font-size:12px">{html.escape(state)}</span>{tgt}</div>')
+
+    if exits:
+        exits.sort(reverse=True)
+        parts.append(f'<h3 style="color:{PALETTE["warn"]};margin-top:10px">⚠ FOMO-sone (vurder å skalere av)</h3>')
+        for dist, sym, iid in exits[:8]:
+            parts.append(f'<div style="padding:3px 0"><strong>{html.escape(sym)}</strong> '
+                         f'<span class="warn">stretched {dist:+.1f}% fra 36-MA</span> '
+                         f'<span class="muted" style="font-size:12px">— høy risiko å gå inn, vurder profittsikring</span></div>')
+
+    if holds_action:
+        parts.append(f'<h3 style="color:{PALETTE["down"]};margin-top:10px">💼 Dine posisjoner</h3>')
+        for r in holds_action:
+            col = PALETTE["down"] if r["verdict"] == "SKALER AV" else PALETTE["warn"]
+            parts.append(f'<div style="padding:3px 0;color:{col};font-weight:600">'
+                         f'{html.escape(r["sym"])}: {html.escape(r["verdict"])} '
+                         f'<span class="muted" style="font-weight:400">({html.escape(r["why"])}, '
+                         f'{r["pnl_pct"]:+.1f}%)</span></div>')
+
+    parts.append('</section>')
+    return "".join(parts)
 
 
-def write_pwa_assets():
-    """Skriv manifest, service worker og to ikoner (PWA-installasjon + offline)."""
-    manifest = {
-        "name": "MarketAnalyzor", "short_name": "Analysor",
-        "start_url": ".", "scope": ".", "display": "standalone",
-        "background_color": "#0b0d10", "theme_color": "#0b0d10",
-        "description": "Gull-relativt, regime-basert markeds-dashboard",
-        "icons": [
-            {"src": "icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any maskable"},
-            {"src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable"},
-        ],
+def _hitrate_section(val) -> str:
+    """📊 Hit-rate-validering: når NSBC-score ≥70, hva ble fremtidig avkastning?"""
+    if not val or not val.get("available"):
+        reason = (val or {}).get("reason", "bygger opp historikk")
+        snaps = (val or {}).get("snapshots", 0)
+        return ('<section class="section"><h2>📊 Hit-rate-validering</h2>'
+                f'<p class="sub">Treffsikkerhet måles fra akkumulert score-historikk: '
+                f'«når score ≥ 70, hva ble fremtidig avkastning vs base-rate?» '
+                f'Status: {html.escape(reason)} ({snaps} snapshots). '
+                f'Statistikken blir meningsfull etter noen måneders daglige bygg.</p></section>')
+
+    parts = ['<section class="section"><h2>📊 Hit-rate-validering</h2>',
+             f'<p class="sub">{html.escape(val.get("signal",""))} — fremtidig avkastning vs '
+             f'<strong>base-rate</strong> (alle perioder). Edge = signal minus base. '
+             f'{html.escape(val.get("note",""))} ({val.get("snapshots")} snapshots.)</p>',
+             '<table><thead><tr><th>Horisont</th><th style="text-align:right">Signal snitt</th>'
+             '<th style="text-align:right">Base-rate</th><th style="text-align:right">Edge</th>'
+             '<th style="text-align:right">Hit-rate</th><th style="text-align:right">n</th>'
+             '<th>Tillit</th></tr></thead><tbody>']
+    for h, r in val.get("horizons", {}).items():
+        sig = r.get("signal"); base = r.get("base")
+        if not sig or not base:
+            continue
+        edge = r.get("edge_mean")
+        ecol = PALETTE["up"] if (edge or 0) > 0 else PALETTE["down"]
+        conf = ('<span class="down">lav (n<20)</span>' if r.get("low_confidence")
+                else '<span class="up">ok</span>')
+        parts.append(f'<tr><td><strong>{h}</strong></td>'
+                     f'<td style="text-align:right">{sig["mean"]:+.1f}%</td>'
+                     f'<td style="text-align:right" class="muted">{base["mean"]:+.1f}%</td>'
+                     f'<td style="text-align:right;color:{ecol};font-weight:700">{edge:+.1f} pp</td>'
+                     f'<td style="text-align:right">{sig["hit_rate"]:.0f}%</td>'
+                     f'<td style="text-align:right">{sig["n"]}</td>'
+                     f'<td>{conf}</td></tr>')
+    parts.append('</tbody></table>'
+                 '<p class="sub" style="margin-top:8px">⚠ Databasen er ung — behandle lave-tillit-tall '
+                 'som foreløpige. En positiv edge over base-rate, med n≥20, er det som teller — ikke '
+                 'råtallet alene. Sizing bør ikke styres av et lite utvalg.</p></section>')
+    return "".join(parts)
+
+
+def _decision_dashboard(data) -> str:
+    """🎯 Dagens beslutningsbilde: regime + tidslinje + endringer + dine posisjoner
+    + paper-vs-deg + benchmark-snapshot. Alt på én skjerm, øverst."""
+    reg = data.get("regime", {})
+    comp = reg.get("composite", {})
+    panic = reg.get("panic", {})
+    changes = data.get("changes") or []
+    uv = data.get("user_portfolio")
+    paper = data.get("paper", {})
+    bench = data.get("benchmarks", {})
+
+    parts = ['<section class="section" style="border:2px solid var(--accent)">'
+             '<h2>🎯 Dagens beslutningsbilde</h2>']
+
+    # Rad 1: regime-status + momentum-regime + endringsteller
+    score = comp.get("score")
+    scol = comp.get("col", PALETTE["muted"])
+    sstate = comp.get("state", "ukjent")
+    n_chg = len(changes)
+    chg_col = PALETTE["warn"] if n_chg else PALETTE["good"]
+    pflag = panic.get("panic")
+    pstr = ("⚠ PANIKK" if pflag else "Normalt") if panic else "n/a"
+    pcol = PALETTE["down"] if pflag else PALETTE["up"]
+    parts.append('<div class="kpi">'
+                 f'<div class="k"><div class="lbl">Makro-regime</div>'
+                 f'<div class="val" style="color:{scol}">{html.escape(sstate)}</div>'
+                 f'<div class="sc-label muted">{score if score is not None else "–"}/100</div></div>'
+                 f'<div class="k"><div class="lbl">Momentum-regime</div>'
+                 f'<div class="val" style="color:{pcol};font-size:16px">{pstr}</div>'
+                 f'<div class="sc-label muted">D&amp;M krasj-vakt</div></div>'
+                 f'<div class="k"><div class="lbl">Endringer i dag</div>'
+                 f'<div class="val" style="color:{chg_col}">{n_chg}</div>'
+                 f'<div class="sc-label muted">signal-flips</div></div>')
+    # Benchmark-snapshot
+    if bench:
+        kpi_no = bench.get("kpi_no_yoy")
+        cpi_us = bench.get("cpi_us_yoy")
+        nowa = bench.get("nowa")
+        ux = bench.get("usdnok")
+        fx = ux[-1][1] if ux else None
+        if kpi_no is not None:
+            parts.append(f'<div class="k"><div class="lbl">Norsk KPI (12m)</div>'
+                         f'<div class="val">{kpi_no:.1f}%</div>'
+                         f'<div class="sc-label muted">realavk.-hinder</div></div>')
+        if cpi_us is not None:
+            parts.append(f'<div class="k"><div class="lbl">US CPI (12m)</div>'
+                         f'<div class="val">{cpi_us:.1f}%</div></div>')
+        if fx is not None:
+            parts.append(f'<div class="k"><div class="lbl">USDNOK</div>'
+                         f'<div class="val">{fx:.2f}</div></div>')
+        if nowa is not None:
+            parts.append(f'<div class="k"><div class="lbl">NOWA (risikofri)</div>'
+                         f'<div class="val">{nowa:.2f}%</div></div>')
+    parts.append('</div>')
+
+    # Regime-tidslinje (stripe over tid)
+    parts.append(_regime_timeline(data.get("regime_history", {})))
+
+    # Rad 2: dine posisjoner som krever handling
+    if uv and uv.get("rows"):
+        actions = [r for r in uv["rows"] if r["verdict"] in ("SKALER AV", "VURDER SKALER AV")]
+        parts.append('<h3 style="margin-top:14px">Dine posisjoner</h3>')
+        if actions:
+            parts.append('<p class="sub">Krever vurdering i dag:</p>')
+            for r in actions:
+                col = PALETTE["down"] if r["verdict"] == "SKALER AV" else PALETTE["warn"]
+                parts.append(f'<div style="padding:3px 0;font-weight:600;color:{col}">'
+                             f'{html.escape(r["sym"])}: {html.escape(r["verdict"])} '
+                             f'<span class="muted" style="font-weight:400">({html.escape(r["why"])}, '
+                             f'verdi {r["value_nok"]:,.0f} kr, {r["pnl_pct"]:+.1f}%)</span></div>')
+        else:
+            parts.append('<p class="sub">Ingen posisjoner krever handling i dag '
+                         f'(total {uv.get("total_nok",0):,.0f} kr).</p>')
+    else:
+        parts.append('<p class="sub" style="margin-top:14px">💡 Synk porteføljen din '
+                     '(docs/portfolio.json) for å se posisjons-varsler her og i Discord.</p>')
+
+    # Rad 3: regelen vs deg
+    curve = paper.get("curve") or []
+    actual = paper.get("actual_curve") or []
+    if curve:
+        start = paper.get("start_nok") or 100000
+        rule_now = curve[-1][1]
+        rule_ret = (rule_now / start - 1) * 100
+        line = (f'Regelen (paper): <strong style="color:{PALETTE["up"] if rule_ret>=0 else PALETTE["down"]}">'
+                f'{rule_ret:+.1f}%</strong> siden {curve[0][0]}')
+        if actual and uv:
+            # felles startpunkt-sammenligning er upresis; vis bare nivåer
+            line += f' · din portefølje nå: {uv.get("total_nok",0):,.0f} kr'
+        parts.append(f'<h3 style="margin-top:14px">Regelen vs. deg</h3>'
+                     f'<p class="sub">{line}. Hypotetisk regelportefølje som rebalanserer '
+                     'mekanisk månedlig — speil for din egen disiplin.</p>')
+
+    parts.append('</section>')
+    return "".join(parts)
+
+
+def _regime_timeline(rhist) -> str:
+    """Fargestripe av composite regime-score over tid (grønn/oransje/rød bånd)."""
+    scores = (rhist or {}).get("scores", [])
+    dates = (rhist or {}).get("dates", [])
+    if len(scores) < 3:
+        return ('<p class="sub" style="margin-top:8px">Regime-tidslinje bygges opp '
+                'etter hvert som daglige bygg kjører.</p>')
+    n = len(scores)
+    W, H = 100.0, 26.0
+    bw = W / n
+    bars = []
+    for i, s in enumerate(scores):
+        col = PALETTE["up"] if s >= 66 else (PALETTE["warn"] if s >= 34 else PALETTE["down"])
+        x = i * bw
+        bars.append(f'<rect x="{x:.3f}" y="0" width="{bw+0.5:.3f}" height="{H}" fill="{col}"/>')
+    d0 = html.escape(dates[0]) if dates else ""
+    d1 = html.escape(dates[-1]) if dates else ""
+    return ('<h3 style="margin-top:14px">Regime-tidslinje</h3>'
+            f'<svg viewBox="0 0 {W} {H}" width="100%" height="26" preserveAspectRatio="none" '
+            f'style="border-radius:6px;display:block">{"".join(bars)}</svg>'
+            f'<div style="display:flex;justify-content:space-between" class="sub">'
+            f'<span>{d0}</span><span class="muted">grønn=risk-on · oransje=overgang · rød=risk-off</span>'
+            f'<span>{d1}</span></div>')
+
+
+def _regime_card(title, label, col, note, explain_key=None):
+    ex = glossary.box(explain_key) if explain_key else ""
+    return (f'<div class="sc" style="border-color:{col}55">'
+            f'<div class="sc-name">{html.escape(title)}</div>'
+            f'<div style="font-size:15px;font-weight:700;color:{col}">{html.escape(label or "–")}</div>'
+            f'<div class="sc-label muted">{html.escape(note or "")}</div>{ex}</div>')
+
+
+def _ranking_table(rk, title, den):
+    rows = rk.get("rows", [])
+    if not rows:
+        return f'<div><h3>{title}</h3><p class="muted">Ingen data.</p></div>'
+    # maks composite for skalering av styrke-bar
+    comps = [abs(r.get("composite") or 0) for r in rows]
+    maxc = max(comps) if comps else 1
+    out = [f'<div><h3>{title}</h3>',
+           '<table><thead><tr><th>#</th><th>Ratio</th><th>Sjanger</th>'
+           '<th style="text-align:right">1M</th><th style="text-align:right">3M</th>'
+           '<th>Leder-styrke</th><th>TV</th></tr></thead><tbody>']
+    for i, r in enumerate(rows, 1):
+        tf = r.get("tf_over") or []
+        comp = r.get("composite")
+        beats = r.get("beats")
+        # Styrke-celle: ikon + tall + proporsjonal bar
+        if beats and comp is not None:
+            barw = int(min(abs(comp) / maxc * 100, 100)) if maxc else 0
+            tfs = "+".join(tf) if tf else ""
+            strength = (f'<div style="font-size:12px;font-weight:700;color:{PALETTE["up"]}">'
+                        f'▲ +{comp:.1f}% <span class="muted" style="font-weight:400">{tfs}</span></div>'
+                        f'<div style="height:5px;background:#1a1f26;border-radius:3px;margin-top:2px">'
+                        f'<div style="height:5px;width:{barw}%;background:{PALETTE["up"]};border-radius:3px"></div></div>')
+        elif beats is False and comp is not None:
+            strength = f'<div style="font-size:12px;font-weight:700;color:{PALETTE["down"]}">▼ {comp:.1f}%</div>'
+        else:
+            strength = '<span class="muted">— n/a</span>'
+        out.append(f'<tr><td class="muted">{i}</td>'
+                   f'<td><strong>{html.escape(r["label"])}/{den}</strong></td>'
+                   f'<td class="muted">{html.escape(r.get("subclass",""))}</td>'
+                   f'{_roc_cell(r.get("roc_1m"))}{_roc_cell(r.get("roc_3m"))}'
+                   f'<td style="min-width:120px">{strength}</td>'
+                   f'<td><a class="tv" href="{_tv(r["label"],den)}" target="_blank" rel="noopener">📊</a></td></tr>')
+    out.append('</tbody></table></div>')
+    return "".join(out)
+
+
+# ── Market Daily Report ───────────────────────────────────────────
+def _dist_display(a) -> str:
+    """Avstand fra 12 & 36 SMA, ukentlig OG månedlig — alltid med tidsramme.
+    Farge: grønn nær/over, oransje strukket (>+10%), rød under."""
+    dw = a.get("dist_w", {}) or {}
+    dm = a.get("dist_m", {}) or {}
+
+    def cell(val):
+        if val is None:
+            return '<span class="muted">n/a</span>'
+        if val >= 10:
+            c = PALETTE["warn"]      # strukket / FOMO
+        elif val >= 0:
+            c = PALETTE["up"]        # sunn, over snitt
+        else:
+            c = PALETTE["down"]      # under snitt
+        return f'<span style="color:{c};font-weight:600">{val:+.1f}%</span>'
+
+    return ('<div style="font-size:11.5px;margin:3px 0;color:var(--muted)">'
+            'Avstand fra MA — '
+            f'<strong>ukentlig:</strong> 12MA {cell(dw.get("d12"))} · 36MA {cell(dw.get("d36"))} &nbsp; '
+            f'<strong>månedlig:</strong> 12MA {cell(dm.get("d12"))} · 36MA {cell(dm.get("d36"))} '
+            '<span class="muted">(0% = ved snittet, +10% = strukket/FOMO-sone)</span></div>')
+
+
+def render_report(data) -> str:
+    P = layout.head("Market Daily Report", 2)
+    out = [P, '<h1 id="top">📊 Market Daily Report</h1>',
+           '<p class="sub">NSBC-score 0–100 (høyere = ekte lavrisiko-entry slik Northstar '
+           'definerer det: <strong>ikke stretched fra 36-MA + nettopp brutt ut av base + over trend</strong>). '
+           'Bygget på evidens-klynge: 12&amp;36 SMA, Ichimoku-sky (9/26/52), distance-fra-36MA, StochRSI og breakout — '
+           'over ukentlig/månedlig/kvartal. Stretched pris i FOMO-sonen gir LAV score (høy risiko), ikke høy. '
+           'LT = langtidsregime (M/Q), KT = korttidstiming (W) — du kan være bull på én og bear på en annen.</p>'
+           'Sektorscore = snitt av medlemmenes score; trend = andel over 50MA (ukentlig).</p>']
+
+    # Sektorscore — kort lenker til sin seksjon lenger ned
+    sec = data.get("sector_summary", {})
+    # stabil anker-nøkkel per sektor (rå sektornavn -> slug)
+    def _slug(name):
+        return "sec-" + "".join(ch if ch.isalnum() else "-" for ch in name.lower())
+    out.append('<section class="section"><h2>Sektorscore</h2>'
+               '<p class="sub">Klikk på et kort for å hoppe til instrumentene i sektoren.</p>'
+               '<div class="sector-grid">')
+    sec_items = sorted(sec.items(), key=lambda kv: -kv[1]["avg_score"])
+    for raw_sec, s in sec_items:
+        c = s["score_col"]; tcol = s["trend_col"]
+        out.append(f'<a class="sc" href="#{_slug(raw_sec)}" style="border-color:{c}55">'
+                   f'<div class="sc-name">{html.escape(s["display"])} <span class="muted" style="font-weight:400">→</span></div>'
+                   f'<div class="sc-score" style="color:{c}">{s["avg_score"]}</div>'
+                   f'<div class="sc-label" style="color:{c}">{html.escape(s["label"])}</div>'
+                   f'<div class="sc-label" style="color:{tcol}">{html.escape(s["trend_txt"])} '
+                   f'<span class="muted">({s["over_ma50"]}/{s["total_ma50"]} over 50MA)</span></div>'
+                   f'<div class="sc-label muted">{s["n"]} instr.</div></a>')
+    out.append('</div></section>')
+
+    # Per-instrument — gruppert etter sektor (sektorer sortert etter score,
+    # instrumenter innen hver sektor sortert etter score)
+    out.append('<section class="section"><h2>Instrumenter</h2>'
+               '<p class="sub">Gruppert etter sektor. Hvert instrument viser om det slår gull '
+               '(ROC 1M/3M) med lenke til TradingView, og en interaktiv prisgraf.</p></section>')
+    assets = data["assets"]
+    chart_init = []
+    for raw_sec, s in sec_items:
+        members = [a for a in assets.values()
+                   if not a.get("missing_data") and a.get("sector") == raw_sec]
+        members.sort(key=lambda a: -a.get("northstar_score", 0))
+        if not members:
+            continue
+        c = s["score_col"]
+        out.append(f'<h2 id="{_slug(raw_sec)}" style="scroll-margin-top:70px;border-bottom:2px solid {c}55;padding-bottom:4px">'
+                   f'{html.escape(s["display"])} '
+                   f'<span style="font-size:14px;color:{c}">snitt {s["avg_score"]} · {html.escape(s["label"])}</span> '
+                   f'<a href="#top" class="tv" style="font-size:11px;float:right">↑ topp</a></h2>')
+        for a in members:
+            iid = a["id"]
+            sc = a["northstar_score"]
+            lab, col = score_label(sc, a)
+            gb = a.get("gold_beat")
+            if gb is None:
+                gb_html = '<span class="muted">vs gull: n/a</span>'
+            else:
+                roc3 = (gb.get("roc") or {}).get("3M")
+                mans = gb.get("mansfield")
+                mans_s = ""
+                if mans is not None:
+                    mc = PALETTE["up"] if mans > 0 else PALETTE["down"]
+                    mans_s = f' · <span style="color:{mc}">Mansfield {mans:+.0f}</span>'
+                if gb.get("beats"):
+                    r3s = f" {roc3:+.1f}%" if roc3 is not None else ""
+                    gb_html = (f'<span class="up">▲ slår gull (pris/gull-forhold,{" ".join(gb.get("tf_over") or [])}'
+                               f'{r3s})</span>{mans_s}')
+                else:
+                    r3s = f" {roc3:+.1f}%" if roc3 is not None else ""
+                    gb_html = f'<span class="down">▼ taper mot gull (3M{r3s})</span>{mans_s}'
+            sym = a.get("symbol_label", iid)
+            rm = a.get("risk", {})
+            risk_str = ""
+            if rm.get("vol") is not None:
+                risk_str = (f'<span class="muted">vol {rm["vol"]:.0f}% · '
+                            f'maxDD {rm["max_dd"]:.0f}% · Sharpe {rm["sharpe"]:.2f}</span>'
+                            if rm.get("sharpe") is not None else
+                            f'<span class="muted">vol {rm["vol"]:.0f}%</span>')
+            # NSBC-tilstand + evidens-badges
+            lt = a.get("lt_state"); st = a.get("st_state")
+            def _sb(s):
+                return ('<span class="up">bull</span>' if s == "bull"
+                        else '<span class="down">bear</span>' if s == "bear"
+                        else '<span class="muted">nøytral</span>')
+            state_html = f'<span class="tag">LT {_sb(lt)} · KT {_sb(st)}</span>'
+            ev = a.get("evidence", [])
+            ticks = a.get("ticks", 0)
+            ev_html = (f'<span class="tag" style="color:{PALETTE["good"]}">✓ {ticks} bevis</span>'
+                       if ticks else "")
+            # Stage-badge (Weinstein) — skiller nedtrend fra strukket
+            stg = a.get("stage"); stg_lab = a.get("stage_label", "")
+            stg_col = {4: PALETTE["down"], 3: PALETTE["warn"], 2: PALETTE["up"],
+                       1: PALETTE["accent"]}.get(stg, PALETTE["muted"])
+            stage_html = (f'<span class="pill" style="background:{stg_col}22;color:{stg_col}">{html.escape(stg_lab)}</span>'
+                          if stg_lab else "")
+            brk_html = ('<span class="pill" style="background:#0072B222;color:#0072B2">▲ breakout</span>'
+                        if a.get("breakout") else "")
+            ev_detail = (f'<div class="muted" style="font-size:11px;margin:2px 0">Evidens: {", ".join(ev)}</div>'
+                         if ev else "")
+            # Avstand fra 12 & 36 MA — ukentlig OG månedlig (alltid med tidsramme)
+            dist_html = _dist_display(a)
+            # Forklaring (stage-reason) i klartekst
+            reason = a.get("stage_reason", "")
+            reason_html = (f'<div class="explain"><span class="ex-what">{html.escape(reason)}</span> '
+                           f'<span class="ex-do">→ {html.escape(glossary.detail("nsbc_score"))}</span></div>'
+                           if reason else "")
+            chart_id = f"ch_{iid}"
+            chart_init.append({"el": chart_id, "series": a.get("price_series", []),
+                               "nsbc": a.get("chart_nsbc", {})})
+            out.append(
+                f'<div class="section" style="margin:10px 0">'
+                f'<div style="display:flex;flex-wrap:wrap;gap:8px;align-items:baseline">'
+                f'<h3>{html.escape(a.get("display_name", iid))}</h3>'
+                f'<span class="tag">{html.escape(sym)}</span>'
+                f'<span class="pill" style="background:{col}22;color:{col}">Score {sc} · {html.escape(lab)}</span>'
+                f'{stage_html}{state_html}{ev_html}{brk_html}'
+                f'{gb_html}'
+                f'<a class="tv" href="{_tv(sym,"GLD")}" target="_blank" rel="noopener">📊 {html.escape(sym)}/GLD</a>'
+                f'</div>'
+                f'{ev_detail}{dist_html}{reason_html}'
+                f'<div style="margin:4px 0">{risk_str}</div>'
+                f'<div class="lwc" id="{chart_id}"></div>'
+                f'</div>')
+
+    # Charts-init (Lightweight Charts)
+    out.append(layout.lwc_script())
+    out.append('<script>\n' + _lwc_init_js(chart_init) + '\n</script>')
+    out.append(layout.foot())
+    return "".join(out)
+
+
+def _lwc_init_js(charts) -> str:
+    payload = json.dumps(charts)
+    return """
+const CHARTS = %s;
+function mkChart(c){
+  const el = document.getElementById(c.el);
+  if(!el || !window.LightweightCharts) return;
+  const n = c.nsbc || {};
+  const hasNsbc = n.candles && n.candles.length > 20;
+  const chart = LightweightCharts.createChart(el, {
+    height: hasNsbc ? 300 : 240, layout:{background:{color:'transparent'}, textColor:'#9aa7b5'},
+    grid:{vertLines:{color:'#1a1f26'}, horzLines:{color:'#1a1f26'}},
+    rightPriceScale:{borderColor:'#262d36'}, timeScale:{borderColor:'#262d36'},
+    crosshair:{mode:0}
+  });
+  if(hasNsbc){
+    // Ichimoku-sky: tegn span A og B som linjer; fyll mellom via baseline-triks.
+    // To area-serier (A topp, B bunn) gir en visuell sky.
+    try {
+      const cloudA = chart.addLineSeries({color:'rgba(0,158,115,0.55)', lineWidth:1, priceLineVisible:false, lastValueVisible:false});
+      const cloudB = chart.addLineSeries({color:'rgba(213,94,0,0.55)', lineWidth:1, priceLineVisible:false, lastValueVisible:false});
+      cloudA.setData((n.cloud_a||[]).map(p=>({time:'20'+p[0],value:p[1]})));
+      cloudB.setData((n.cloud_b||[]).map(p=>({time:'20'+p[0],value:p[1]})));
+    } catch(e){}
+    // Candlesticks (kompakte nøkler t/o/h/l/c -> Lightweight Charts-format)
+    const candle = chart.addCandlestickSeries({
+      upColor:'#009E73', downColor:'#D55E00', borderVisible:false,
+      wickUpColor:'#009E73', wickDownColor:'#D55E00'});
+    candle.setData(n.candles.map(k=>({time:'20'+k.t, open:k.o, high:k.h, low:k.l, close:k.c})));
+    // 12 & 36 SMA (NSBC Trend Navigator)
+    const ma12 = chart.addLineSeries({color:'#56B4E9', lineWidth:1, priceLineVisible:false, lastValueVisible:false, title:'12'});
+    const ma36 = chart.addLineSeries({color:'#E69F00', lineWidth:2, priceLineVisible:false, lastValueVisible:false, title:'36'});
+    ma12.setData((n.sma12||[]).map(p=>({time:'20'+p[0],value:p[1]})));
+    ma36.setData((n.sma36||[]).map(p=>({time:'20'+p[0],value:p[1]})));
+  } else if(c.series && c.series.length) {
+    const s = chart.addAreaSeries({lineColor:'#0072B2', topColor:'rgba(0,114,178,0.30)',
+      bottomColor:'rgba(0,114,178,0.02)', lineWidth:2});
+    s.setData(c.series.map(p => ({time:p[0], value:p[1]})));
+  } else { return; }
+  chart.timeScale().fitContent();
+  new ResizeObserver(()=>chart.applyOptions({width:el.clientWidth})).observe(el);
+}
+const io = new IntersectionObserver((entries,obs)=>{
+  entries.forEach(e=>{ if(e.isIntersecting){ const c=CHARTS.find(x=>x.el===e.target.id);
+    if(c){ mkChart(c); obs.unobserve(e.target);} } });
+}, {rootMargin:'200px'});
+CHARTS.forEach(c=>{ const el=document.getElementById(c.el); if(el) io.observe(el); });
+""" % payload
+
+
+# ── RRG-scatter (SVG, ingen ekstern lib) ──────────────────────────
+def _rrg_section(rrg) -> str:
+    pts = (rrg or {}).get("points", [])
+    if not pts:
+        return ""
+    # Skala: finn min/max rundt 100, med marginer
+    xs = [p["rs_ratio"] for p in pts]
+    ys = [p["rs_momentum"] for p in pts]
+    xmin, xmax = min(94, min(xs) - 1), max(106, max(xs) + 1)
+    ymin, ymax = min(94, min(ys) - 1), max(106, max(ys) + 1)
+    W, H, pad = 680, 460, 44
+
+    def sx(v):
+        return pad + (v - xmin) / (xmax - xmin) * (W - 2 * pad)
+
+    def sy(v):
+        return H - pad - (v - ymin) / (ymax - ymin) * (H - 2 * pad)
+
+    x100, y100 = sx(100), sy(100)
+    # Kvadrant-farger (colorblind-trygge, lav metning)
+    quad_cols = {"Leading": "#0072B2", "Weakening": "#E69F00",
+                 "Lagging": "#D55E00", "Improving": "#56B4E9"}
+    svg = [f'<svg viewBox="0 0 {W} {H}" width="100%" style="max-width:700px;background:var(--panel2);border-radius:10px">']
+    # kvadrant-bakgrunner
+    svg.append(f'<rect x="{x100}" y="{pad}" width="{W-pad-x100}" height="{y100-pad}" fill="#0072B215"/>')
+    svg.append(f'<rect x="{x100}" y="{y100}" width="{W-pad-x100}" height="{H-pad-y100}" fill="#E69F0015"/>')
+    svg.append(f'<rect x="{pad}" y="{y100}" width="{x100-pad}" height="{H-pad-y100}" fill="#D55E0015"/>')
+    svg.append(f'<rect x="{pad}" y="{pad}" width="{x100-pad}" height="{y100-pad}" fill="#56B4E915"/>')
+    # akse-kryss
+    svg.append(f'<line x1="{x100}" y1="{pad}" x2="{x100}" y2="{H-pad}" stroke="#3a4452" stroke-dasharray="4 4"/>')
+    svg.append(f'<line x1="{pad}" y1="{y100}" x2="{W-pad}" y2="{y100}" stroke="#3a4452" stroke-dasharray="4 4"/>')
+    # kvadrant-etiketter
+    svg.append(f'<text x="{W-pad-6}" y="{pad+16}" fill="#0072B2" font-size="12" text-anchor="end" font-weight="700">LEADING</text>')
+    svg.append(f'<text x="{W-pad-6}" y="{H-pad-6}" fill="#E69F00" font-size="12" text-anchor="end" font-weight="700">WEAKENING</text>')
+    svg.append(f'<text x="{pad+6}" y="{H-pad-6}" fill="#D55E00" font-size="12" font-weight="700">LAGGING</text>')
+    svg.append(f'<text x="{pad+6}" y="{pad+16}" fill="#56B4E9" font-size="12" font-weight="700">IMPROVING</text>')
+    # akse-titler
+    svg.append(f'<text x="{W/2}" y="{H-8}" fill="var(--muted)" font-size="11" text-anchor="middle">RS-Ratio (relativ styrke) →</text>')
+    svg.append(f'<text x="14" y="{H/2}" fill="var(--muted)" font-size="11" text-anchor="middle" transform="rotate(-90 14 {H/2})">RS-Momentum →</text>')
+    # punkter med haler
+    for p in pts:
+        col = quad_cols.get(p["quadrant"], "#999")
+        px, py = sx(p["rs_ratio"]), sy(p["rs_momentum"])
+        tail = p.get("tail", [])
+        if len(tail) >= 2:
+            pl = " ".join(f"{sx(a)},{sy(b)}" for a, b in tail)
+            svg.append(f'<polyline points="{pl}" fill="none" stroke="{col}" stroke-width="1.5" opacity="0.45"/>')
+        svg.append(f'<circle cx="{px}" cy="{py}" r="5" fill="{col}" stroke="#0b0d10" stroke-width="1.5"/>')
+        svg.append(f'<text x="{px+8}" y="{py+4}" fill="var(--text)" font-size="11" font-weight="600">{html.escape(p["label"])}</text>')
+    svg.append('</svg>')
+    return ('<section class="section"><h2>🔄 RRG — Relative Rotation Graph (vs gull)</h2>'
+            '<p class="sub">RS-Ratio (relativ styrke) på x-aksen, RS-Momentum (endringstakt) på y-aksen, '
+            'sentrert på 100. Instrumenter roterer mot klokka: Improving → Leading → Weakening → Lagging. '
+            'Halen viser de siste punktene (retning). Ett blikk gir hele lederskapsbildet.</p>'
+            + "".join(svg) +
+            '<details><summary>Hvordan lese RRG</summary>'
+            '<p class="sub" style="margin-top:8px">Øvre høyre (Leading, blå) = slår gull med positivt momentum — '
+            'sterkest. Nedre høyre (Weakening, oransje) = fortsatt over, men momentum avtar. Nedre venstre '
+            '(Lagging, vermillion) = svakest. Øvre venstre (Improving, lyseblå) = under gull, men på vei opp — '
+            'tidlige vendingskandidater. En sunn opptrend roterer Improving → Leading.</p></details>'
+            '</section>')
+
+
+# ── Korrelasjonsmatrise (SVG heatmap) ─────────────────────────────
+def _corr_section(corr) -> str:
+    ids = (corr or {}).get("ids", [])
+    mat = (corr or {}).get("matrix", [])
+    if not ids or not mat:
+        return ""
+    n = len(ids)
+    cell = 34
+    label_pad = 46
+    W = label_pad + n * cell + 10
+    H = label_pad + n * cell + 10
+
+    def color(v):
+        # Divergerende, colorblind-trygt: blå (negativ) — grå (0) — vermillion (positiv)
+        if v >= 0:
+            t = min(v, 1.0)
+            return f'rgba(213,94,0,{0.12 + 0.6*t:.2f})'   # vermillion
+        t = min(-v, 1.0)
+        return f'rgba(0,114,178,{0.12 + 0.6*t:.2f})'       # blå
+
+    svg = [f'<svg viewBox="0 0 {W} {H}" width="100%" style="max-width:{W}px;background:var(--panel2);border-radius:10px">']
+    for j, lab in enumerate(ids):
+        x = label_pad + j * cell + cell / 2
+        svg.append(f'<text x="{x}" y="{label_pad-6}" fill="var(--muted)" font-size="10" text-anchor="middle" transform="rotate(-45 {x} {label_pad-6})">{html.escape(lab)}</text>')
+        y = label_pad + j * cell + cell / 2 + 3
+        svg.append(f'<text x="{label_pad-6}" y="{y}" fill="var(--muted)" font-size="10" text-anchor="end">{html.escape(lab)}</text>')
+    for i in range(n):
+        for j in range(n):
+            v = mat[i][j]
+            x = label_pad + j * cell
+            y = label_pad + i * cell
+            tcol = "#e6edf3" if abs(v) > 0.45 else "#9aa7b5"
+            svg.append(f'<rect x="{x}" y="{y}" width="{cell-2}" height="{cell-2}" rx="3" fill="{color(v)}"/>')
+            svg.append(f'<text x="{x+cell/2-1}" y="{y+cell/2+3}" fill="{tcol}" font-size="9" text-anchor="middle">{v:.2f}</text>')
+    svg.append('</svg>')
+    return ('<section class="section"><h2>🔗 Korrelasjonsmatrise (252 dager)</h2>'
+            '<p class="sub">Daglig-avkastnings-korrelasjon mellom hovedaktivaklasser. '
+            'Vermillion = positiv samvariasjon, blå = negativ. Lav/negativ korrelasjon mellom '
+            'posisjoner = ekte diversifisering; høy korrelasjon = skjult konsentrasjonsrisiko.</p>'
+            + "".join(svg) + '</section>')
+
+
+# ── Backtest-side ─────────────────────────────────────────────────
+def render_backtest(data) -> str:
+    P = layout.head("Backtest", 5)
+    bt = data.get("backtest", {})
+    out = [P, '<h1>🧪 Backtest — walk-forward</h1>',
+           '<p class="sub">Ærlig out-of-sample-test av en enkel, økonomisk motivert rotasjonsregel: '
+           'eier topp-N sykliske mot gull (3M+6M momentum), med absolutt-momentum-filter (dual momentum) '
+           'og volatilitetsskalering mot momentum-krasj. Ingen parameteroptimalisering på testdata.</p>']
+
+    if not bt.get("available"):
+        out.append(f'<section class="section"><p class="down">Backtest utilgjengelig: '
+                   f'{html.escape(bt.get("reason","ukjent"))}.</p></section>')
+        out.append(layout.foot())
+        return "".join(out)
+
+    s, sp, g = bt["strategy"], bt["spy"], bt["gold"]
+    out.append('<section class="section"><h2>Resultater</h2>'
+               f'<p class="sub">Periode {bt["start"]} → {bt["end"]} ({bt["months"]} måneder), '
+               f'topp-{bt["top_n"]}, snitt {bt["avg_holdings"]} posisjoner. Månedlig rebalansering med '
+               f'<strong>value-tilt</strong> (vekt {bt.get("value_weight","–")} på reversal, Asness), '
+               f'<strong>hysterese</strong> (z-margin {bt.get("hysteresis_z","–")}), '
+               f'<strong>transaksjonskostnad {bt.get("tx_cost_bps","–")} bps</strong> '
+               f'(årlig turnover ~{bt.get("annual_turnover","–")}%), <strong>kontinuerlig vol-skalering</strong> '
+               f'(snitt eksp. {bt.get("avg_exposure","–")}) og <strong>panikk-demper</strong> '
+               f'({bt.get("panic_months","–")} måneder dempet, Daniel &amp; Moskowitz).</p>'
+               '<table><thead><tr><th>Strategi</th><th style="text-align:right">Total</th>'
+               '<th style="text-align:right">CAGR</th><th style="text-align:right">Vol</th>'
+               '<th style="text-align:right">Sharpe</th><th style="text-align:right">Max DD</th></tr></thead><tbody>')
+    for name, d, col in [("Rotasjon (regel)", s, PALETTE["up"]),
+                         ("Kjøp-og-hold SPY", sp, PALETTE["accent"]),
+                         ("Kjøp-og-hold gull", g, PALETTE["warn"])]:
+        out.append(f'<tr><td style="color:{col};font-weight:600">{name}</td>'
+                   f'<td style="text-align:right">{d.get("total_return","–")}%</td>'
+                   f'<td style="text-align:right">{d.get("cagr","–")}%</td>'
+                   f'<td style="text-align:right">{d.get("vol","–")}%</td>'
+                   f'<td style="text-align:right">{d.get("sharpe","–")}</td>'
+                   f'<td style="text-align:right" class="down">{d.get("max_dd","–")}%</td></tr>')
+    out.append('</tbody></table>')
+    out.append('<div class="lwc" id="bt_chart" style="height:340px"></div></section>')
+
+    # ekvitykurve via Lightweight Charts (3 serier)
+    series = {
+        "strat": [[bt["dates"][i], bt["strategy"]["curve"][i]] for i in range(len(bt["dates"]))],
+        "spy": [[bt["dates"][i], bt["spy"]["curve"][i]] for i in range(len(bt["dates"]))],
+        "gold": [[bt["dates"][i], bt["gold"]["curve"][i]] for i in range(len(bt["dates"]))],
     }
-    (DOCS / "manifest.webmanifest").write_text(json.dumps(manifest), encoding="utf-8")
+    out.append('<section class="section"><h2>Tolkning &amp; forbehold</h2>'
+               '<p class="sub">En clean walk-forward kan fortsatt smigre en regel. Sammenlign '
+               '<strong>out-of-sample Sharpe</strong> mot kjøp-og-hold: hvis rotasjonsregelen ikke '
+               'slår en enkel SPY-/gull-posisjon på risikojustert basis, er den ikke verdt kompleksiteten. '
+               'Momentum krasjer sjelden, men hardt, i skarpe vendinger etter bear-marked (Daniel &amp; '
+               'Moskowitz 2016) — derfor volatilitetsskaleringen. <strong>Ikke finansrådgivning.</strong></p>'
+               '<details><summary>Metodikk</summary>'
+               '<p class="sub" style="margin-top:8px">Signaler beregnes fra data t.o.m. forrige måned og '
+               'brukes på inneværende måneds avkastning (ingen look-ahead). Cash-avkastning antas 0%. '
+               'Transaksjonskostnader er ikke modellert — reell avkastning ville vært noe lavere. '
+               'Universet er dagens sykliske instrumenter; instrumenter uten nok historikk faller naturlig ut '
+               'tidlig i perioden (en mild survivorship-effekt).</p></details></section>')
 
-    # Service worker: network-first for data (.json), cache-first for resten.
-    sw = """const CACHE = 'analysor-v5';
-const CORE = ['./','./index.html','./trend.html','./report.html','./roadmap.html','./portfolio.html','./backtest.html',
-  './lightweight-charts.standalone.production.js','./manifest.webmanifest'];
-self.addEventListener('install', e => {
-  e.waitUntil(caches.open(CACHE).then(c => c.addAll(CORE)).then(()=>self.skipWaiting()));
-});
-self.addEventListener('activate', e => {
-  e.waitUntil(caches.keys().then(ks => Promise.all(
-    ks.filter(k => k !== CACHE).map(k => caches.delete(k)))).then(()=>self.clients.claim()));
-});
-self.addEventListener('fetch', e => {
-  const url = e.request.url;
-  if (url.endsWith('.json')) {                       // data: network-first
-    e.respondWith(fetch(e.request).then(r => {
-      const cp = r.clone(); caches.open(CACHE).then(c => c.put(e.request, cp)); return r;
-    }).catch(() => caches.match(e.request)));
-  } else {                                           // shell: cache-first
-    e.respondWith(caches.match(e.request).then(r => r || fetch(e.request)));
-  }
-});
+    out.append(layout.lwc_script())
+    out.append('<script>\nconst BT = ' + json.dumps(series) + ';\n' + _bt_chart_js() + '\n</script>')
+
+    # ── ANBEFALINGS-BACKTEST: "hvis alle anbefalinger var fulgt" ──
+    rb = data.get("rec_backtest", {})
+    out.append(_rec_backtest_section(rb))
+
+    # ── LIVE anbefalings-logg: akkumulerer faktiske anbefalinger fremover ──
+    out.append(_rec_log_section(data.get("rec_log")))
+
+    out.append(layout.foot())
+    return "".join(out)
+
+
+def _rec_log_section(rl) -> str:
+    if not rl or not rl.get("curve"):
+        return ('<section class="section"><h2>📈 Live anbefalings-portefølje</h2>'
+                '<p class="sub">Følger de faktiske kjøp-anbefalingene fra «I dag» framover i tid, '
+                'likevektet. Kurven starter når historikken begynner å bygge seg opp — kom tilbake '
+                'etter noen dager med kjøringer. Dette er forskjellig fra anbefalings-backtesten over, '
+                'som rekonstruerer fortiden.</p></section>')
+    curve = rl["curve"]
+    val = curve[-1][1] if curve else 100
+    ret = val - 100
+    rcol = PALETTE["up"] if ret >= 0 else PALETTE["down"]
+    parts = ['<section class="section" style="border:2px solid var(--up)">',
+             '<h2>📈 Live anbefalings-portefølje (akkumulerer framover)</h2>',
+             f'<p class="sub">Følger de faktiske kjøp-anbefalingene fra «I dag»-siden, likevektet, '
+             f'fra oppstart {html.escape(rl.get("inception",""))}. Hver dag kjøpes nye anbefalinger og '
+             f'de som faller ut selges. Indeksert til 100 ved start. '
+             f'<strong>Forskjellig fra backtesten over</strong> — denne bygger seg opp i sanntid.</p>',
+             f'<div style="font-size:24px;font-weight:700;color:{rcol};margin:6px 0">'
+             f'{val:.1f} <span style="font-size:14px">({ret:+.1f}% siden start)</span></div>',
+             f'<p class="muted" style="font-size:12px">{rl.get("n_active",0)} aktive posisjoner: '
+             f'{html.escape(", ".join(rl.get("active",[])[:20]))}</p>']
+    if len(curve) >= 2:
+        parts.append('<div class="lwc" id="reclog_chart" style="height:300px"></div>')
+        rser = [[c[0], c[1]] for c in curve]
+        parts.append('<script>\nconst RECLOG = ' + json.dumps(rser) + ';\n'
+                     '(function(){function initRL(){var el=document.getElementById("reclog_chart");'
+                     'if(!el||!window.LightweightCharts)return;'
+                     'var chart=LightweightCharts.createChart(el,{height:300,'
+                     'layout:{background:{color:"transparent"},textColor:"#9aa7b5"},'
+                     'grid:{vertLines:{color:"#1a1f26"},horzLines:{color:"#1a1f26"}},'
+                     'rightPriceScale:{borderColor:"#262d36"},timeScale:{borderColor:"#262d36"}});'
+                     'var s=chart.addAreaSeries({lineColor:"#009E73",topColor:"rgba(0,158,115,0.3)",'
+                     'bottomColor:"rgba(0,158,115,0.02)",lineWidth:2});'
+                     's.setData(RECLOG.map(function(p){return {time:p[0],value:p[1]};}));'
+                     'chart.timeScale().fitContent();'
+                     'new ResizeObserver(function(){chart.applyOptions({width:el.clientWidth});}).observe(el);}'
+                     'if(window.LightweightCharts)initRL();else window.addEventListener("load",initRL);})();'
+                     '\n</script>')
+    # Nylige hendelser
+    ev = rl.get("recent_events", [])
+    if ev:
+        parts.append('<details style="margin-top:8px"><summary style="cursor:pointer;color:var(--accent)">'
+                     'Nylige kjøp/salg</summary><table><thead><tr><th>Dato</th><th>Handling</th>'
+                     '<th>Instrument</th></tr></thead><tbody>')
+        for e in reversed(ev):
+            ac = PALETTE["up"] if e["action"] == "KJØP" else PALETTE["down"]
+            parts.append(f'<tr><td>{html.escape(e["date"])}</td>'
+                         f'<td style="color:{ac};font-weight:600">{html.escape(e["action"])}</td>'
+                         f'<td>{html.escape(e["id"])}</td></tr>')
+        parts.append('</tbody></table></details>')
+    parts.append('<p class="sub" style="margin-top:8px">Forenklet modell: likevektet, ingen '
+                 'transaksjonskostnad, daglig verdsetting. Bygger ekte sporing av anbefalingene '
+                 'over tid. <strong>Ikke finansrådgivning.</strong></p></section>')
+    return "".join(parts)
+
+
+def _rec_backtest_section(rb) -> str:
+    if not rb or not rb.get("available"):
+        reason = (rb or {}).get("reason", "ikke tilgjengelig")
+        return ('<section class="section"><h2>📋 Anbefalings-backtest</h2>'
+                f'<p class="sub">«Hvis alle NSBC-anbefalinger var fulgt» — {html.escape(reason)}.</p></section>')
+    sysd, sp, g = rb["system"], rb["spy"], rb["gold"]
+    parts = ['<section class="section" style="border:2px solid var(--accent)">',
+             '<h2>📋 Anbefalings-backtest: «hvis alle anbefalinger var fulgt»</h2>',
+             '<p class="sub">Dette er forskjellig fra rotasjons-regelen over. Her rekonstrueres '
+             '<strong>NSBC-scoren punkt-for-punkt historisk</strong>, og porteføljen eier alle '
+             f'instrumenter som var i konstruktiv tilstand (score ≥ {rb.get("score_threshold",60)}) '
+             'OG slo gull 3M — likevektet, månedlig. Signal på månedsslutt → kjøp neste måned '
+             '(ingen look-ahead), 15bps kostnad. '
+             f'Periode {rb["start"]} → {rb["end"]} ({rb["months"]} mnd), snitt {rb["avg_holdings"]} posisjoner.</p>']
+    parts.append('<table><thead><tr><th>Strategi</th><th style="text-align:right">CAGR</th>'
+                 '<th style="text-align:right">Vol</th><th style="text-align:right">Sharpe</th>'
+                 '<th style="text-align:right">Max DD</th></tr></thead><tbody>')
+    for name, d, col in [("Anbefalingssystem", sysd, PALETTE["up"]),
+                         ("Kjøp-og-hold SPY", sp, PALETTE["accent"]),
+                         ("Kjøp-og-hold gull", g, PALETTE["warn"])]:
+        parts.append(f'<tr><td style="color:{col};font-weight:600">{name}</td>'
+                     f'<td style="text-align:right">{d.get("cagr","–")}%</td>'
+                     f'<td style="text-align:right">{d.get("vol","–")}%</td>'
+                     f'<td style="text-align:right">{d.get("sharpe","–")}</td>'
+                     f'<td style="text-align:right" class="down">{d.get("max_dd","–")}%</td></tr>')
+    parts.append('</tbody></table>')
+    parts.append('<div class="lwc" id="recbt_chart" style="height:340px"></div>')
+    # Ærlig vurdering
+    sys_sharpe = sysd.get("sharpe") or 0
+    spy_sharpe = sp.get("sharpe") or 0
+    if rb.get("suspicious_lookahead"):
+        verdict = ('<div class="warn" style="font-weight:600">⚠ Mistenkelig høy ytelse '
+                   '(Sharpe>1,5 eller CAGR>15%) — kan tyde på residual look-ahead. Tolk med skepsis.</div>')
+    elif sys_sharpe > spy_sharpe:
+        verdict = (f'<div class="up" style="font-weight:600">✓ Anbefalingssystemet slår kjøp-og-hold SPY '
+                   f'risikojustert (Sharpe {sys_sharpe} vs {spy_sharpe}).</div>')
+    else:
+        verdict = (f'<div style="font-weight:600;color:var(--warn)">Anbefalingssystemet slår IKKE kjøp-og-hold SPY '
+                   f'risikojustert (Sharpe {sys_sharpe} vs {spy_sharpe}). Da bør det brukes som '
+                   'beslutnings-støtte, ikke som mekanisk «bruk dette»-signal.</div>')
+    parts.append(verdict)
+    parts.append('<details style="margin-top:8px"><summary style="cursor:pointer;color:var(--accent)">Metodikk &amp; forbehold</summary>'
+                 '<p class="sub" style="margin-top:8px">NSBC-score beregnes kun på data t.o.m. forrige måned '
+                 '(.iloc-snitt, ingen look-ahead). Signal på månedsslutt → fyll neste måned. Dette er en '
+                 '<strong>simulering av mekanisk fulgte signaler</strong>, ikke en logg over faktisk gjennomførte '
+                 'handler — reell diskresjonær timing ville avvike. Cash-avkastning antas 0%. '
+                 '<strong>Ikke finansrådgivning.</strong></p></details>')
+    parts.append('</section>')
+    # chart-data
+    rseries = {
+        "sys": [[rb["dates"][i], sysd["curve"][i]] for i in range(len(rb["dates"]))],
+        "spy": [[rb["dates"][i], sp["curve"][i]] for i in range(len(rb["dates"]))],
+        "gold": [[rb["dates"][i], g["curve"][i]] for i in range(len(rb["dates"]))],
+    }
+    parts.append('<script>\nconst RECBT = ' + json.dumps(rseries) + ';\n'
+                 '(function(){function initR(){var el=document.getElementById("recbt_chart");'
+                 'if(!el||!window.LightweightCharts)return;'
+                 'var chart=LightweightCharts.createChart(el,{height:340,'
+                 'layout:{background:{color:"transparent"},textColor:"#9aa7b5"},'
+                 'grid:{vertLines:{color:"#1a1f26"},horzLines:{color:"#1a1f26"}},'
+                 'rightPriceScale:{borderColor:"#262d36"},timeScale:{borderColor:"#262d36"}});'
+                 'var mk=function(d,c){var s=chart.addLineSeries({color:c,lineWidth:2});'
+                 's.setData(d.map(function(p){return {time:p[0]+"-01",value:p[1]};}));};'
+                 'mk(RECBT.sys,"#009E73");mk(RECBT.spy,"#56B4E9");mk(RECBT.gold,"#E69F00");'
+                 'chart.timeScale().fitContent();'
+                 'new ResizeObserver(function(){chart.applyOptions({width:el.clientWidth});}).observe(el);}'
+                 'if(window.LightweightCharts)initR();else window.addEventListener("load",initR);})();'
+                 '\n</script>')
+    return "".join(parts)
+
+
+def _bt_chart_js() -> str:
+    return """
+function initBt(){
+  const el = document.getElementById('bt_chart');
+  if(!el || !window.LightweightCharts) return;
+  const chart = LightweightCharts.createChart(el, {
+    height:340, layout:{background:{color:'transparent'}, textColor:'#9aa7b5'},
+    grid:{vertLines:{color:'#1a1f26'}, horzLines:{color:'#1a1f26'}},
+    rightPriceScale:{borderColor:'#262d36'}, timeScale:{borderColor:'#262d36'}
+  });
+  const mk = (data,color)=>{ const s=chart.addLineSeries({color,lineWidth:2});
+    s.setData(data.map(p=>({time:p[0]+'-01', value:p[1]}))); return s; };
+  mk(BT.strat, '#0072B2'); mk(BT.spy, '#56B4E9'); mk(BT.gold, '#E69F00');
+  chart.timeScale().fitContent();
+  new ResizeObserver(()=>chart.applyOptions({width:el.clientWidth})).observe(el);
+}
+if(window.LightweightCharts) initBt(); else window.addEventListener('load', initBt);
 """
-    (DOCS / "sw.js").write_text(sw, encoding="utf-8")
-
-    # Ikoner: ren-Python PNG (ingen Pillow). Mørk bakgrunn + blå trekant (opp).
-    _write_icon_png(DOCS / "icon-192.png", 192)
-    _write_icon_png(DOCS / "icon-512.png", 512)
-    log("PWA-ressurser skrevet (manifest, sw.js, ikoner)")
 
 
-def _write_icon_png(path: Path, size: int):
-    """Skriv en enkel PNG uten eksterne biblioteker (zlib + struct + CRC)."""
-    import struct
-    import zlib
-    bg = (11, 13, 16)       # --bg
-    blue = (0, 114, 178)    # Okabe-Ito blå
-    cx = size / 2
-    # Trekant (pilspiss opp) sentrert
-    top_y, base_y = size * 0.26, size * 0.74
-    half = size * 0.26
-    rows = bytearray()
-    for y in range(size):
-        rows.append(0)  # filter-byte per rad
-        for x in range(size):
-            r, g, b = bg
-            if top_y <= y <= base_y:
-                frac = (y - top_y) / (base_y - top_y)
-                w = half * frac
-                if (cx - w) <= x <= (cx + w):
-                    r, g, b = blue
-            rows += bytes((r, g, b))
+# ── Roadmap-side (NSBC-stil auto-roadmaps) ────────────────────────
+def render_roadmap(data) -> str:
+    P = layout.head("Roadmaps", 3)
+    roadmaps = data.get("roadmaps", {})
+    assets = data.get("assets", {})
+    out = [P, '<h1>🗺️ Roadmaps</h1>',
+           '<p class="sub">Auto-genererte roadmaps i NSBC-stil: support/resistance, '
+           'trend-kanal, mål (measured move + Fibonacci) og scenarioer (bull/base/bear) '
+           'med invaliderings-nivå. Bygget fra ukentlig OHLC. '
+           '<strong>Ikke finansrådgivning.</strong></p>']
 
-    def chunk(tag, data):
-        c = struct.pack(">I", len(data)) + tag + data
-        return c + struct.pack(">I", zlib.crc32(tag + data) & 0xffffffff)
+    if not roadmaps:
+        out.append('<section class="section"><p class="muted">Ingen roadmaps tilgjengelig ennå.</p></section>')
+        out.append(layout.foot())
+        return "".join(out)
 
-    sig = b"\x89PNG\r\n\x1a\n"
-    ihdr = struct.pack(">IIBBBBB", size, size, 8, 2, 0, 0, 0)  # 8-bit RGB
-    idat = zlib.compress(bytes(rows), 9)
-    png = sig + chunk(b"IHDR", ihdr) + chunk(b"IDAT", idat) + chunk(b"IEND", b"")
-    path.write_bytes(png)
+    # Sorter etter score (sterkest oppsett først)
+    order = sorted(roadmaps.keys(),
+                   key=lambda i: -(assets.get(i, {}).get("northstar_score", 0)))
+
+    # Toggle nominal/gull
+    out.append('<div style="margin:8px 0"><button class="btn secondary" id="tgGold" '
+               'onclick="toggleGold()">Vis priced-in-gold</button></div>')
+
+    rm_charts = []
+    for iid in order:
+        entry = roadmaps[iid]
+        a = assets.get(iid, {})
+        sym = a.get("symbol_label", iid)
+        score = a.get("northstar_score", "–")
+        lab, col = score_label(score, a) if isinstance(score, int) else ("", PALETTE["muted"])
+        nominal = entry.get("nominal", {})
+        out.append(f'<section class="section roadmap-card" data-id="{iid}">')
+        out.append(f'<div style="display:flex;flex-wrap:wrap;gap:10px;align-items:baseline">'
+                   f'<h2 style="margin:0">{html.escape(a.get("display_name", iid))}</h2>'
+                   f'<span class="tag">{html.escape(sym)}</span>'
+                   f'<span class="pill" style="background:{col}22;color:{col}">Score {score} · {html.escape(lab)}</span>'
+                   f'<span class="muted" style="font-size:12px">{html.escape(a.get("state_label",""))}</span>'
+                   f'</div>')
+        # Tegnet roadmap-chart (candles + 12/36 MA + S/R + mål + scenarioer)
+        chart = nominal.get("chart")
+        if chart and chart.get("candles"):
+            cid = f"rm_{iid}"
+            rm_charts.append({"el": cid, "chart": chart})
+            out.append(f'<div class="lwc" id="{cid}" style="height:340px"></div>')
+            out.append('<div style="font-size:11px;color:var(--muted);margin:2px 0 6px">'
+                       '🟦 12-MA · 🟧 36-MA · grønne linjer = motstand/mål · '
+                       'røde linjer = støtte/invalidering (ukentlig)</div>')
+        # Scenario-sammendrag (alltid synlig)
+        out.append(f'<div class="rm-nominal">{_roadmap_scenarios(nominal)}</div>')
+        # Detaljer i utvidbar seksjon (progressiv avsløring)
+        out.append('<details style="margin-top:8px"><summary style="cursor:pointer;color:var(--accent);font-size:13px">'
+                   'Vis tall-detaljer (nivåer, kanal, fib)</summary>'
+                   f'<div class="rm-nominal">{_roadmap_block(nominal, sym)}</div>')
+        if entry.get("gold"):
+            out.append(f'<div class="rm-gold" style="display:none">'
+                       f'<p class="sub">Priced in gold ({html.escape(sym)}/GLD):</p>'
+                       f'{_roadmap_block(entry.get("gold"), sym + "/GLD")}</div>')
+        out.append('</details></section>')
+
+    out.append('<script>function toggleGold(){'
+               'var g=document.querySelectorAll(".rm-gold"),n=document.querySelectorAll(".rm-nominal");'
+               'var show=g.length&&g[0].style.display==="none";'
+               'g.forEach(e=>e.style.display=show?"block":"none");'
+               'n.forEach(e=>e.style.display=show?"none":"block");'
+               'document.getElementById("tgGold").textContent=show?"Vis nominell":"Vis priced-in-gold";}'
+               '</script>')
+    out.append(layout.lwc_script())
+    out.append('<script>\n' + _roadmap_chart_js(rm_charts) + '\n</script>')
+    out.append(layout.foot())
+    return "".join(out)
 
 
-if __name__ == "__main__":
-    main()
+def _roadmap_scenarios(rm) -> str:
+    """Kompakt scenario-sammendrag (alltid synlig over detaljene)."""
+    if not rm:
+        return ""
+    sc = rm.get("scenarios", {})
+    last = rm.get("last")
+
+    def row(name, d, color):
+        t = d.get("target")
+        if t is None:
+            return ""
+        p = d.get("pct")
+        psign = f"{p:+.1f}%" if isinstance(p, (int, float)) else ""
+        return (f'<div style="padding:2px 0"><span style="color:{color};font-weight:700">{name}</span> '
+                f'<strong>{t:g}</strong> <span style="color:{color}">{psign}</span></div>')
+
+    inval = rm.get("invalidation")
+    inval_s = (f'<div style="padding:2px 0;color:{PALETTE["down"]}">⛔ Invalidering: <strong>{inval:g}</strong></div>'
+               if inval else "")
+    return ('<div style="display:flex;flex-wrap:wrap;gap:16px;margin:6px 0;font-size:13px">'
+            + row("🟢 Bull", sc.get("bull", {}), PALETTE["up"])
+            + row("⚪ Base", sc.get("base", {}), PALETTE["accent"])
+            + row("🔴 Bear", sc.get("bear", {}), PALETTE["down"])
+            + inval_s + '</div>')
+
+
+def _roadmap_chart_js(charts) -> str:
+    payload = json.dumps(charts)
+    return """
+const RMCHARTS = %s;
+function mkRm(c){
+  const el = document.getElementById(c.el);
+  if(!el || !window.LightweightCharts) return;
+  const d = c.chart;
+  const chart = LightweightCharts.createChart(el, {
+    height: 340, layout:{background:{color:'transparent'}, textColor:'#9aa7b5'},
+    grid:{vertLines:{color:'#1a1f26'}, horzLines:{color:'#1a1f26'}},
+    rightPriceScale:{borderColor:'#262d36'}, timeScale:{borderColor:'#262d36'}, crosshair:{mode:0}
+  });
+  const candle = chart.addCandlestickSeries({upColor:'#009E73', downColor:'#D55E00',
+    borderVisible:false, wickUpColor:'#009E73', wickDownColor:'#D55E00'});
+  candle.setData(d.candles.map(k=>({time:'20'+k.t, open:k.o, high:k.h, low:k.l, close:k.c})));
+  const ma12 = chart.addLineSeries({color:'#56B4E9', lineWidth:1, priceLineVisible:false, lastValueVisible:false});
+  const ma36 = chart.addLineSeries({color:'#E69F00', lineWidth:2, priceLineVisible:false, lastValueVisible:false});
+  ma12.setData((d.sma12||[]).map(p=>({time:'20'+p[0],value:p[1]})));
+  ma36.setData((d.sma36||[]).map(p=>({time:'20'+p[0],value:p[1]})));
+  const lv = d.levels || {};
+  const pl = (price,color,title,style)=>{ if(price==null) return;
+    candle.createPriceLine({price:price, color:color, lineWidth:1,
+      lineStyle:(style||2), axisLabelVisible:true, title:title}); };
+  (lv.resistance||[]).forEach((r,i)=>pl(r,'#009E73','R'+(i+1)));
+  (lv.support||[]).forEach((s,i)=>pl(s,'#D55E00','S'+(i+1)));
+  pl(lv.bull,'#009E73','BULL',0);
+  pl(lv.base,'#56B4E9','BASE',0);
+  pl(lv.bear,'#D55E00','BEAR',0);
+  pl(lv.invalidation,'#CC0000','⛔ INVAL',3);
+  chart.timeScale().fitContent();
+  new ResizeObserver(()=>chart.applyOptions({width:el.clientWidth})).observe(el);
+}
+const rio = new IntersectionObserver((entries,obs)=>{
+  entries.forEach(e=>{ if(e.isIntersecting){ const c=RMCHARTS.find(x=>x.el===e.target.id);
+    if(c){ mkRm(c); obs.unobserve(e.target);} } });
+}, {rootMargin:'200px'});
+RMCHARTS.forEach(c=>{ const el=document.getElementById(c.el); if(el) rio.observe(el); });
+""" % payload
+
+
+def _roadmap_block(rm, sym) -> str:
+    if not rm:
+        return '<p class="muted">For lite data.</p>'
+    last = rm["last"]
+    sc = rm["scenarios"]
+
+    def level_row(name, sc_data, color):
+        t = sc_data.get("target")
+        p = sc_data.get("pct")
+        if t is None:
+            return ""
+        psign = f"{p:+.1f}%" if p is not None else ""
+        trig = sc_data.get("trigger")
+        trig_s = f' <span class="muted">trigger {trig:g}</span>' if trig else ""
+        return (f'<tr><td style="color:{color};font-weight:700">{name}</td>'
+                f'<td style="text-align:right">{t:g}</td>'
+                f'<td style="text-align:right;color:{color}">{psign}</td>'
+                f'<td class="muted" style="font-size:11px">{html.escape(sc_data.get("note",""))}{trig_s}</td></tr>')
+
+    rows = (level_row("🟢 BULL", sc["bull"], PALETTE["up"]) +
+            level_row("⚪ BASE", sc["base"], PALETTE["accent"]) +
+            level_row("🔴 BEAR", sc["bear"], PALETTE["down"]))
+
+    # støtte/motstand-nivåer
+    res = " · ".join(f'{r["price"]:g}' for r in rm.get("resistance", [])[:3]) or "–"
+    sup = " · ".join(f'{s["price"]:g}' for s in rm.get("support", [])[:3]) or "–"
+    chan = rm.get("channel") or {}
+    r2 = chan.get("r2")
+    trend_q = ("sterk" if (r2 or 0) > 0.7 else "moderat" if (r2 or 0) > 0.4 else "svak")
+    inval = rm.get("invalidation")
+    stretched = rm.get("stretched")
+
+    extra = ""
+    if stretched:
+        extra = (f'<div class="warn" style="font-weight:600;margin:6px 0">'
+                 f'⚠ Stretched fra 36-MA ({rm.get("dist36")}%) — IKKE et lavrisiko-entry (FOMO-sone)</div>')
+
+    inval_s = f"{inval:g}" if inval else "–"
+    return (
+        f'<table style="margin-top:8px"><thead><tr><th>Scenario</th><th style="text-align:right">Mål</th>'
+        f'<th style="text-align:right">Avstand</th><th>Kommentar</th></tr></thead><tbody>{rows}</tbody></table>'
+        f'{extra}'
+        f'<div class="kpi" style="margin-top:8px">'
+        f'<div class="k"><div class="lbl">Pris nå</div><div class="val">{last:g}</div></div>'
+        f'<div class="k"><div class="lbl">Motstand over</div><div class="val" style="font-size:14px">{res}</div></div>'
+        f'<div class="k"><div class="lbl">Støtte under</div><div class="val" style="font-size:14px">{sup}</div></div>'
+        f'<div class="k"><div class="lbl">Invalidering</div><div class="val" style="font-size:15px;color:{PALETTE["down"]}">{inval_s}</div></div>'
+        f'<div class="k"><div class="lbl">Trend-kvalitet (R²)</div><div class="val" style="font-size:15px">{r2 if r2 is not None else "–"} <span class="muted" style="font-size:11px">{trend_q}</span></div></div>'
+        f'</div>')
