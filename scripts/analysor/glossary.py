@@ -110,6 +110,18 @@ EXPLAIN = {
         "what": "Sektor-rotasjon: hvilke sjangre kapital strømmer inn i vs ut av, målt mot bredt marked.",
         "do": "Kjøp helst der pengene strømmer INN (innstrømning + akselererende). Unngå utstrømning.",
     },
+    "capital_flows": {
+        "what": "Kapitalstrøm mellom land: regioner rangert på relativ styrke målt i gull, pluss dollartrend og USA-konsentrasjon.",
+        "do": "Kapital driver bull-markeder i destinasjonen. Flight-to-quality (gull+USD+stat samtidig opp) = krisevarsel. Kun ett datapunkt.",
+    },
+    "rvol": {
+        "what": "Relativt volum: siste 4-ukers snittvolum vs 20-ukers snitt. Over 1,0 = volum over normalen.",
+        "do": "Breakout uten volum (<1,0) feiler oftere — vent på bekreftelse før kjøp.",
+    },
+    "from_52wh": {
+        "what": "Avstand fra 52-ukers topp. Nærhet til toppen er et dokumentert momentum-signal (George-Hwang).",
+        "do": "Innen -5% av toppen = sterkt momentum. Mer enn -20% under = svakt eller i base.",
+    },
 }
 
 
