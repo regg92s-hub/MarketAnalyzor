@@ -15,49 +15,45 @@ from __future__ import annotations
 
 
 def _genre_lookup(genre_strength):
-    """sektor/sjanger -> medvind-multiplikator (0.7-1.15)."""
+    """sektor/sjanger -> {strength 0-100, state}. Strength = % av medlemmer som slår gull."""
     out = {}
     for g in genre_strength or []:
-        # strength er % som slår gull; medvind hvis >= terskel
-        s = g.get("strength", 50)
-        if g.get("medvind"):
-            mult = 1.0 + min((s - 70) / 100.0, 0.15)   # opp til +15%
-        elif g.get("state") == "Nedadgående":
-            mult = 0.7
-        else:
-            mult = 0.88
-        out[g.get("genre")] = {"mult": mult, "state": g.get("state"), "strength": s}
+        s = g.get("strength")
+        out[g.get("genre")] = {"strength": s if s is not None else 50,
+                               "state": g.get("state")}
     return out
 
 
-def _macro_mult(regime):
-    """Makro-regime -> global multiplikator. Risk-on løfter sykliske, risk-off demper."""
+def _macro_state(regime):
+    """Makro-regime -> (score 0-100, tilstand)."""
     comp = (regime or {}).get("composite", {})
     score = comp.get("score")
     if score is None:
-        return 1.0, "ukjent"
+        return 50, "ukjent"
     if score >= 66:
-        return 1.10, "risk-on"
+        return score, "risk-on"
     if score >= 34:
-        return 1.0, "nøytral"
-    return 0.82, "risk-off"
+        return score, "nøytral"
+    return score, "risk-off"
 
 
 def build_today(assets, genre_strength, regime, sector_summary,
-                user_portfolio=None, roadmaps=None, money_flow=None, sector_flow=None):
-    macro_mult, macro_state = _macro_mult(regime)
+                user_portfolio=None, roadmaps=None, money_flow=None, sector_flow=None,
+                capital_flows=None):
+    macro_score, macro_state = _macro_state(regime)
     genre = _genre_lookup(genre_strength)
-    # sektor (norsk visningsnavn) -> sjanger-info via assets[].sector
     leaderboard = []
     for iid, a in assets.items():
         if a.get("missing_data"):
             continue
         score = a.get("northstar_score", 0)
         sec = a.get("sector")
-        gi = genre.get(sec, {"mult": 0.9, "state": "?", "strength": None})
-        gmult = gi["mult"]
-        # Vekt-av-bevis-kompositt: score × sjanger × makro
-        composite = round(score * gmult * macro_mult, 1)
+        gi = genre.get(sec, {"strength": 50, "state": "?"})
+        gstr = gi["strength"] if gi["strength"] is not None else 50
+        # Vekt-av-bevis-kompositt: NORMALISERT VEKTET SUM (ikke multiplikativ —
+        # multiplikasjon dobbeltstraffer og kollapser skalaen). Eget oppsett
+        # veier tyngst (65%); sjanger (20%) og makro (15%) er kontekst.
+        composite = round(0.65 * score + 0.20 * gstr + 0.15 * macro_score, 1)
         gb = a.get("gold_beat") or {}
         leaderboard.append({
             "id": iid,
@@ -73,30 +69,38 @@ def build_today(assets, genre_strength, regime, sector_summary,
             "mansfield": gb.get("mansfield"),
             "roc3m": gb.get("roc3m"),
             "dist36": a.get("dist36_w"),
+            "from52wh": a.get("pct_from_52wh"),
+            "vol_ratio": a.get("vol_ratio"),
             "stretched": a.get("stretched", False),
             "breakout": a.get("breakout", False),
             "genre_state": gi["state"],
-            "genre_mult": round(gmult, 2),
+            "genre_strength": gstr,
             "spark": [p[1] for p in (a.get("price_series") or [])[-30:]],
         })
-    # Standard sortering: kompositt synkende
     leaderboard.sort(key=lambda r: -r["composite"])
 
-    # Kjøp-kandidater: ekte lavrisiko-entry (score>=70, ikke stretched, breakout
-    # eller konstruktiv) OG sjanger ikke nedadgående OG makro ikke risk-off
+    # Kjøp-kandidater: ekte lavrisiko-entry + sjanger/makro-medvind.
+    # NYTT (volum-evidens): breakout uten volum-bekreftelse (RVOL < 1.0)
+    # kvalifiserer ikke — volumløse brudd feiler oftere.
     buys = []
     for r in leaderboard:
         if (r["score"] >= 65 and not r["stretched"]
                 and r["stage"] in (1, 2)
                 and r["genre_state"] != "Nedadgående"
                 and macro_state != "risk-off"):
+            vr = r.get("vol_ratio")
+            if r["breakout"] and vr is not None and vr < 1.0:
+                continue  # volumløst brudd — vent på bekreftelse
             why = []
             if r["breakout"]:
-                why.append("breakout")
+                why.append("breakout" + (" m/volum" if vr and vr >= 1.2 else ""))
             if r["beats_gold"]:
                 why.append("slår gull")
             if r["genre_state"] == "I medvind":
                 why.append("sjanger-medvind")
+            f52 = r.get("from52wh")
+            if f52 is not None and f52 >= -5:
+                why.append("nær 52u-topp")
             r2 = dict(r); r2["why"] = ", ".join(why) or "konstruktivt oppsett"
             buys.append(r2)
     buys = buys[:8]
@@ -125,6 +129,16 @@ def build_today(assets, genre_strength, regime, sector_summary,
         "inflow": [{"sector": f["display"], "roc_3m": f["roc_3m"], "accel": f.get("accel")} for f in inflow],
         "outflow": [{"sector": f["display"], "roc_3m": f["roc_3m"]} for f in outflow],
     }
+    # Kapitalstrøm (Armstrong-stil, datapunkt): hvor internasjonal kapital søker seg
+    cf = capital_flows or {}
+    cap_summary = None
+    if cf.get("verdict"):
+        cap_summary = {
+            "verdict": cf["verdict"], "col": cf.get("col"),
+            "destinations": cf.get("destinations", [])[:3],
+            "dollar": cf.get("dollar", {}).get("state"),
+            "us_concentration": cf.get("us_concentration", {}).get("state"),
+        }
 
     # Verdikt-linje (nå med pengestrøm)
     n_buys = len(buys)
@@ -148,6 +162,7 @@ def build_today(assets, genre_strength, regime, sector_summary,
         "macro_state": macro_state,
         "macro_score": (regime or {}).get("composite", {}).get("score"),
         "flow": flow_summary,
+        "capital": cap_summary,
         "buys": buys,
         "avoids": avoids,
         "leaderboard": leaderboard,
