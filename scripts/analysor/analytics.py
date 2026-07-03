@@ -308,6 +308,96 @@ def sector_flow(raw, assets_meta):
     return {"flows": flows, "baseline": ("ACWI" if raw.get("ACWI") is not None else "SPY")}
 
 
+def capital_flows(raw):
+    """
+    Kapitalstrøm (Armstrong-inspirert, kun som DATAPUNKT): hvor internasjonal
+    kapital søker seg — mellom land/regioner, inn/ut av dollar, og konsentrasjon
+    i USA vs resten av verden. Frie proxier: relativ styrke i lands-ETF-er målt
+    i GULL (felles nøytral valuta), dollartrend (UUP), og SPY/ACWI-forhold.
+    Evidensbasert del av rammeverket (kapitalflukt, flight-to-quality) — ikke
+    sykluspåstander.
+    """
+    from .config import PALETTE
+    gld = raw.get("GLD")
+    if gld is None:
+        return {}
+    regions = [("USA", "SPY"), ("Europa", "EXSA"), ("Japan", "EWJ"),
+               ("Storbritannia", "EWU"), ("Kina", "FXI"), ("India", "INDA"),
+               ("Brasil", "EWZ"), ("EM samlet", "EEM"), ("Canada", "EWC"),
+               ("Australia", "EWA")]
+    dest = []
+    for name, iid in regions:
+        df = raw.get(iid)
+        if df is None:
+            continue
+        comb = pd.DataFrame({"n": df["close_use"], "d": gld["close_use"]}).dropna()
+        if len(comb) < 70:
+            continue
+        ratio = comb["n"] / comb["d"]
+        r3 = ind.roc(ratio, 63)
+        r1 = ind.roc(ratio, 21)
+        if r3 is None:
+            continue
+        dest.append({"region": name, "roc_3m": round(r3, 1),
+                     "roc_1m": round(r1, 1) if r1 is not None else None,
+                     "accel": (r1 is not None and r1 > r3 / 3)})
+    dest.sort(key=lambda x: -x["roc_3m"])
+
+    # Dollartrend: søker kapital seg til eller fra USD?
+    dollar = {}
+    uup = raw.get("UUP")
+    if uup is not None and len(uup) > 70:
+        c = uup["close_use"].dropna()
+        r3 = ind.roc(c, 63)
+        ma50 = c.rolling(50).mean()
+        over = bool(c.iloc[-1] > ma50.iloc[-1]) if pd.notna(ma50.iloc[-1]) else None
+        if (r3 or 0) > 0 and over:
+            dollar = {"state": "Kapital søker USD", "col": PALETTE["up"], "roc_3m": round(r3, 1)}
+        elif (r3 or 0) < -1:
+            dollar = {"state": "Kapital forlater USD", "col": PALETTE["down"], "roc_3m": round(r3, 1)}
+        else:
+            dollar = {"state": "USD nøytral", "col": PALETTE["warn"],
+                      "roc_3m": round(r3, 1) if r3 is not None else None}
+
+    # USA-konsentrasjon: SPY/ACWI — strømmer kapital inn i USA eller ut i verden?
+    us_conc = {}
+    spy, acwi = raw.get("SPY"), raw.get("ACWI")
+    if spy is not None and acwi is not None:
+        comb = pd.DataFrame({"n": spy["close_use"], "d": acwi["close_use"]}).dropna()
+        if len(comb) > 70:
+            r3 = ind.roc(comb["n"] / comb["d"], 63)
+            if r3 is not None:
+                if r3 > 0.5:
+                    us_conc = {"state": "Konsentreres i USA", "col": PALETTE["up"], "roc_3m": round(r3, 1)}
+                elif r3 < -0.5:
+                    us_conc = {"state": "Diversifiseres ut av USA", "col": PALETTE["warn"], "roc_3m": round(r3, 1)}
+                else:
+                    us_conc = {"state": "Balansert USA/verden", "col": PALETTE["neutral"], "roc_3m": round(r3, 1)}
+
+    # Flight-to-quality: gull + USD + statsobligasjoner stiger samtidig = krisestrøm
+    ftq = False
+    tlt = raw.get("TLT")
+    if uup is not None and tlt is not None:
+        g3 = ind.roc(gld["close_use"].dropna(), 63) or 0
+        u3 = ind.roc(uup["close_use"].dropna(), 63) or 0
+        t3 = ind.roc(tlt["close_use"].dropna(), 63) or 0
+        ftq = g3 > 2 and u3 > 0 and t3 > 0
+
+    top = dest[0]["region"] if dest else None
+    if ftq:
+        verdict = "⚠ Flight-to-quality: gull, USD og statsobligasjoner stiger samtidig — kapital søker trygghet."
+        col = PALETTE["down"]
+    elif top:
+        d2 = f", {dest[1]['region']}" if len(dest) > 1 else ""
+        verdict = f"Kapital søker seg mot {top}{d2} (målt i gull). {dollar.get('state','')}"
+        col = PALETTE["up"] if dest[0]["roc_3m"] > 0 else PALETTE["warn"]
+    else:
+        verdict, col = "Utilstrekkelig data for kapitalstrøm.", PALETTE["neutral"]
+
+    return {"destinations": dest, "dollar": dollar, "us_concentration": us_conc,
+            "flight_to_quality": ftq, "verdict": verdict, "col": col}
+
+
 def rotation(raw, assets_meta):
     """Kapitalrotasjon: hovedinstrumenter vs gull (ROC 1M/3M)."""
     gld = raw.get("GLD")
