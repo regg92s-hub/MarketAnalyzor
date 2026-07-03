@@ -358,3 +358,35 @@ som anbefalingene kommer inn — så du ser hvordan det faktisk hadde gått å f
 
 > Forenklet modell: likevektet, ingen transaksjonskostnad, daglig verdsetting. Kurven er
 > tom de første dagene og fylles ut etter hvert. **Ikke finansrådgivning.**
+
+## v12: Runde 5 — kompositt-fiks, kapitalstrøm, volum-gating, 52u-topp, UX
+
+Basert på femte dybderesearch (Fable + research). Fem endringer:
+
+**Kompositt-formelen rettet (viktigst).** Den multiplikative vekt-av-bevis-kompositten
+(score × sjanger × makro) dobbeltstraffet og kollapset skalaen — et instrument med
+score 80 i svak sjanger og risk-off endte på ~46 uten at tallet var tolkbart. Nå:
+**normalisert vektet sum** — kompositt = 0,65×score + 0,20×sjangerstyrke + 0,15×makro-
+score, alle på 0-100-skala. Eget oppsett veier tyngst; sjanger og makro er kontekst.
+Skalaen er nå tolkbar og sorterbar uten skjulte interaksjoner.
+
+**🌍 Kapitalstrøm (Armstrong-inspirert, som datapunkt).** Regioner rangert på relativ
+styrke målt i GULL (felles nøytral valuta) — proxy for hvor internasjonal kapital søker
+seg. Pluss dollartrend (kapital inn/ut av USD), USA-konsentrasjon (SPY/ACWI), og
+flight-to-quality-varsel (gull+USD+stat opp samtidig = krisestrøm). Vises som stripe på
+I dag og full tabell på Trend. Bevisst kun de evidensbaserte delene av rammeverket
+(kapitalflukt, valutadrevet avkastning) — ingen sykluspåstander.
+
+**Volum-gating på kjøp-kandidater.** Breakout uten volum-bekreftelse (RVOL < 1,0,
+4-ukers vs 20-ukers snittvolum) kvalifiserer ikke lenger — volumløse brudd feiler
+oftere. Breakout med RVOL ≥ 1,2 merkes «m/volum».
+
+**52-ukers-topp-nærhet.** Ny leaderboard-kolonne (George-Hwang: nærhet til 52u-topp er
+et dokumentert momentum-signal). Innen -5 % av toppen styrker kjøps-begrunnelsen.
+
+**UX: filter, diff og guidet flyt.** Leaderboarden har tekstfilter (symbol/sjanger).
+I dag viser «Endret siden forrige bygg» (nye kjøp-kandidater, stage-overganger til
+nedtrend, regime-skift). Ny «🧭 Start her»-guide viser arbeidsflyten steg for steg.
+Discord-varsler prioriterer nå nye kjøp-kandidater og nye Stage 4-nedtrender.
+
+**Ikke finansrådgivning.**
