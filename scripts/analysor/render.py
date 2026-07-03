@@ -68,6 +68,32 @@ def render_today(data) -> str:
                    f'<span style="color:{PALETTE["up"]}">▲ Inn:</span> {in_s}<br>'
                    f'<span style="color:{PALETTE["down"]}">▼ Ut:</span> {out_s}</div></div>')
 
+    # Kapitalstrøm (Armstrong-stil datapunkt): hvor internasjonal kapital søker seg
+    cap = td.get("capital") or {}
+    if cap.get("verdict"):
+        ccol = cap.get("col", PALETTE["warn"])
+        dests = cap.get("destinations", [])
+        dest_s = " · ".join(f'{html.escape(d["region"])} ({d["roc_3m"]:+.1f}%{"⚡" if d.get("accel") else ""})'
+                            for d in dests) or "n/a"
+        extra = []
+        if cap.get("us_concentration"):
+            extra.append(html.escape(cap["us_concentration"]))
+        out.append(f'<div style="background:var(--panel2);border-radius:8px;padding:10px 12px;margin-bottom:12px">'
+                   f'<div style="font-weight:700;color:{ccol};margin-bottom:4px">🌍 Kapitalstrøm (land, målt i gull)</div>'
+                   f'<div style="font-size:12.5px;line-height:1.6">{html.escape(cap["verdict"])}<br>'
+                   f'<span class="muted">Topp-destinasjoner: {dest_s}'
+                   f'{" · " + " · ".join(extra) if extra else ""}</span></div></div>')
+
+    # Hva er nytt siden forrige bygg (diff)
+    changes = data.get("changes", [])
+    if changes:
+        out.append('<div style="background:var(--panel2);border-radius:8px;padding:10px 12px;margin-bottom:12px">'
+                   '<div style="font-weight:700;margin-bottom:4px">🔔 Endret siden forrige bygg</div>')
+        for c in changes[:6]:
+            cls = "up" if c.startswith(("▲", "🎯")) else ("down" if c.startswith(("▼", "⚠")) else "muted")
+            out.append(f'<div class="{cls}" style="font-size:12.5px;padding:2px 0">{html.escape(c)}</div>')
+        out.append('</div>')
+
     # Tre kolonner: kjøp / skaler av / dine posisjoner
     out.append('<div class="today-cols">')
 
@@ -117,6 +143,18 @@ def render_today(data) -> str:
 
     # ── LAG 2: Sorterbar leaderboard ──────────────────────────────
     lb = td.get("leaderboard", [])
+    # Guidet arbeidsflyt (Start her)
+    out.append('<details class="section" style="padding:10px 14px"><summary style="cursor:pointer;font-weight:700">'
+               '🧭 Start her — slik bruker du verktøyet</summary>'
+               '<div style="font-size:13px;line-height:1.7;margin-top:8px">'
+               '1. Sjekk <strong>makro-verdikt og pengestrøm</strong> øverst — er det medvind eller motvind?<br>'
+               '2. Se <strong>kjøp-kandidatene</strong> — bare instrumenter i ekte lavrisiko-entry med sjanger-medvind kvalifiserer.<br>'
+               '3. Sorter <strong>leaderboarden</strong> for å se hva som gjør det bra/dårlig — kompositt vekter oppsett + sjanger + makro.<br>'
+               '4. Åpne <a href="roadmap.html">roadmapen</a> for kandidaten — sjekk mål, støtte og invalideringsnivå FØR du kjøper.<br>'
+               '5. Bruk <a href="portfolio.html">porteføljesiden</a> for posisjonsstørrelse (vol-justert) og loggfør beslutningen.<br>'
+               '6. <a href="backtest.html">Backtesten</a> viser ærlig om systemet faktisk har edge — sjekk før du stoler blindt på det.'
+               '</div></details>')
+
     out.append('<section class="section"><h2>📊 Leaderboard — hele universet</h2>'
                '<p class="sub">Klikk en kolonne for å sortere. <strong>Kompositt</strong> = '
                'NSBC-score × sjanger-medvind × makro (vekt-av-bevis): et instrument flyter til '
@@ -142,11 +180,14 @@ def _leaderboard_table(lb) -> str:
         ("composite", "Kompositt"), ("sym", "Symbol"), ("score", "Score"),
         ("stage", "Stage"), ("trend", "LT/KT"), ("beats", "Slår gull"),
         ("mansfield", "Mansfield"), ("roc3m", "3M %"), ("dist36", "Fra 36-MA"),
-        ("sector", "Sjanger"),
+        ("from52wh", "Fra 52u-topp"), ("sector", "Sjanger"),
     ]
     th = "".join(f'<th data-k="{k}" style="cursor:pointer;user-select:none">{lbl} <span class="sort-ar"></span></th>'
                  for k, lbl in head_cols)
-    return (f'<div style="overflow-x:auto"><table id="lbTable" class="lb"><thead><tr>{th}</tr></thead>'
+    return (f'<input id="lbFilter" type="text" placeholder="Filtrer på symbol eller sjanger..." '
+            f'style="width:100%;max-width:340px;padding:7px 10px;margin:0 0 8px;background:var(--panel2);'
+            f'border:1px solid var(--border);border-radius:7px;color:var(--text);font-size:13px">'
+            f'<div style="overflow-x:auto"><table id="lbTable" class="lb"><thead><tr>{th}</tr></thead>'
             f'<tbody></tbody></table></div>'
             f'<script>const LB={_json.dumps(lb)};{_leaderboard_js()}</script>')
 
@@ -154,8 +195,10 @@ def _leaderboard_table(lb) -> str:
 def _leaderboard_js() -> str:
     return r"""
 (function(){
-  let sortK='composite', sortDir=-1;
+  let sortK='composite', sortDir=-1, filt='';
   const tb=document.querySelector('#lbTable tbody');
+  const fEl=document.getElementById('lbFilter');
+  if(fEl) fEl.addEventListener('input',()=>{ filt=fEl.value.toLowerCase(); render(); });
   const upC='#009E73',downC='#D55E00',warnC='#E69F00',mutC='#7d8a99';
   function scoreColor(s){ if(s>=70)return upC; if(s>=55)return '#56B4E9'; if(s>=40)return warnC; return downC; }
   function stageLabel(st){ return {1:'1 Basing',2:'2 Opptrend',3:'3 Distrib.',4:'4 Nedtrend'}[st]||'–'; }
@@ -165,7 +208,7 @@ def _leaderboard_js() -> str:
     const up=arr[arr.length-1]>=arr[0]; return `<svg width="${w}" height="${h}" style="vertical-align:middle"><polyline points="${pts}" fill="none" stroke="${up?upC:downC}" stroke-width="1.3"/></svg>`; }
   function cell(v,c){ return `<td style="${c||''}">${v}</td>`; }
   function render(){
-    const rows=[...LB].sort((a,b)=>{ let x=a[sortK],y=b[sortK];
+    const rows=[...LB].filter(r=>!filt||(r.sym||'').toLowerCase().includes(filt)||(r.sector||'').toLowerCase().includes(filt)||(r.name||'').toLowerCase().includes(filt)).sort((a,b)=>{ let x=a[sortK],y=b[sortK];
       if(sortK==='sym'||sortK==='sector'){ x=(x||'');y=(y||''); return sortDir*x.localeCompare(y); }
       if(sortK==='trend'){ x=(a.lt||'')+(a.kt||'');y=(b.lt||'')+(b.kt||''); return sortDir*x.localeCompare(y); }
       if(sortK==='beats'){ x=a.beats_gold?1:0;y=b.beats_gold?1:0; }
@@ -177,13 +220,14 @@ def _leaderboard_js() -> str:
       const mans=r.mansfield==null?tr(null):`<span style="color:${r.mansfield>0?upC:downC}">${r.mansfield>0?'+':''}${r.mansfield}</span>`;
       const roc=r.roc3m==null?tr(null):`<span style="color:${r.roc3m>=0?upC:downC}">${r.roc3m>=0?'+':''}${r.roc3m.toFixed(1)}%</span>`;
       const dist=r.dist36==null?tr(null):`<span style="color:${r.dist36>=10?warnC:(r.dist36>=0?upC:downC)}">${r.dist36>=0?'+':''}${r.dist36.toFixed(1)}%</span>`;
+      const f52=r.from52wh==null?tr(null):`<span style="color:${r.from52wh>=-5?upC:(r.from52wh>=-15?warnC:downC)}">${r.from52wh.toFixed(1)}%</span>`;
       return `<tr>
         <td style="font-weight:700;color:${scoreColor(r.composite)}">${r.composite} ${spark(r.spark)}</td>
         <td><a href="report.html#${r.id}" style="color:var(--text);font-weight:600;text-decoration:none">${r.sym}</a></td>
         <td style="color:${scoreColor(r.score)};font-weight:600">${r.score}</td>
         <td style="color:${stageColor(r.stage)};font-size:12px">${stageLabel(r.stage)}</td>
         <td style="font-size:11px">${sb(r.lt)}/${sb(r.kt)}</td>
-        ${cell(beats)}${cell(mans)}${cell(roc)}${cell(dist)}
+        ${cell(beats)}${cell(mans)}${cell(roc)}${cell(dist)}${cell(f52)}
         <td class="muted" style="font-size:11px">${r.sector||''}</td></tr>`;
     }).join('');
     document.querySelectorAll('#lbTable th').forEach(th=>{
@@ -345,6 +389,43 @@ def render_trend(data) -> str:
                        f'<td style="text-align:right;color:{f["col"]}">{r1:+.1f}%</td>'
                        f'<td style="text-align:right;color:{f["col"]};font-weight:600">{r3:+.1f}%</td></tr>')
         out.append('</tbody></table></section>')
+
+    # 🌍 Kapitalstrøm (Armstrong-stil datapunkt)
+    cf = data.get("capital_flows", {})
+    if cf.get("destinations"):
+        out.append('<section class="section"><h2>🌍 Kapitalstrøm — hvor internasjonal kapital søker seg</h2>'
+                   '<p class="sub">Land/regioner rangert på relativ styrke <strong>målt i gull</strong> '
+                   '(felles nøytral valuta) — proxy for hvor kapital strømmer. 3M/1M = ratio-ROC. '
+                   '⚡ = akselererende (1M leder 3M). Pluss dollartrend og USA-konsentrasjon (SPY/ACWI). '
+                   'Kun et datapunkt, ikke en tese alene.</p>')
+        v = cf.get("verdict", "")
+        vcol = cf.get("col", PALETTE["warn"])
+        out.append(f'<div class="explain" style="border-left-color:{vcol};margin-bottom:8px">'
+                   f'<span class="ex-what" style="color:{vcol};font-weight:700">{html.escape(v)}</span></div>')
+        out.append('<table><thead><tr><th>Region</th><th style="text-align:right">1M</th>'
+                   '<th style="text-align:right">3M (i gull)</th></tr></thead><tbody>')
+        for d in cf["destinations"]:
+            c = PALETTE["up"] if d["roc_3m"] > 0 else PALETTE["down"]
+            acc = " ⚡" if d.get("accel") else ""
+            r1 = f'{d["roc_1m"]:+.1f}%' if d.get("roc_1m") is not None else "–"
+            out.append(f'<tr><td><strong>{html.escape(d["region"])}</strong>{acc}</td>'
+                       f'<td style="text-align:right;color:{c}">{r1}</td>'
+                       f'<td style="text-align:right;color:{c};font-weight:600">{d["roc_3m"]:+.1f}%</td></tr>')
+        out.append('</tbody></table>')
+        cards = []
+        dd = cf.get("dollar")
+        if dd:
+            r3s = f' ({dd["roc_3m"]:+.1f}%)' if dd.get("roc_3m") is not None else ""
+            cards.append(f'<div class="sc" style="border-color:{dd["col"]}55"><div class="sc-name">Dollartrend (UUP, 3M)</div>'
+                         f'<div style="font-size:15px;font-weight:700;color:{dd["col"]}">{html.escape(dd["state"])}{r3s}</div></div>')
+        uc = cf.get("us_concentration")
+        if uc:
+            cards.append(f'<div class="sc" style="border-color:{uc["col"]}55"><div class="sc-name">USA-konsentrasjon (SPY/ACWI, 3M)</div>'
+                         f'<div style="font-size:15px;font-weight:700;color:{uc["col"]}">{html.escape(uc["state"])} ({uc["roc_3m"]:+.1f}%)</div></div>')
+        if cards:
+            out.append('<div class="sector-grid" style="margin-top:8px">' + "".join(cards) + '</div>')
+        out.append(glossary.box("capital_flows"))
+        out.append('</section>')
 
     # Kapitalrotasjon
     rot = data.get("rotation")
