@@ -174,6 +174,27 @@ def main():
         # Avstand fra 12 & 36 MA på ukentlig OG månedlig (NSBC distance-gauge)
         a["dist_w"] = {"d12": wf.get("dist12"), "d36": wf.get("dist36")}
         a["dist_m"] = {"d12": mf.get("dist12"), "d36": mf.get("dist36")}
+        # Volum-bekreftelse (RVOL): siste 4-ukers snittvolum vs 20-ukers snitt.
+        # >1.0 = volum over normalen; brukes til å bekrefte breakouts.
+        try:
+            vol = df["volume"].dropna() if "volume" in df else None
+            if vol is not None and len(vol) > 120 and float(vol.tail(100).mean()) > 0:
+                wv = vol.resample("W-FRI").sum().dropna()
+                if len(wv) >= 24 and float(wv.tail(20).mean()) > 0:
+                    a["vol_ratio"] = round(float(wv.tail(4).mean() / wv.tail(20).mean()), 2)
+                else:
+                    a["vol_ratio"] = None
+            else:
+                a["vol_ratio"] = None
+        except Exception:
+            a["vol_ratio"] = None
+        # Avstand fra 52-ukers topp (George-Hwang: nærhet til 52u-topp er momentum)
+        try:
+            c252 = df["close_use"].dropna().tail(252)
+            hi = float(c252.max())
+            a["pct_from_52wh"] = round((float(c252.iloc[-1]) / hi - 1) * 100, 1) if hi > 0 else None
+        except Exception:
+            a["pct_from_52wh"] = None
         # porteføljens overkjøpt/stretched-sjekk bruker nå NSBC-evidens
         a["rsi_q"] = qf.get("srsi_k")
         a["overbought_w"] = bool(wf.get("srsi_overbought"))
@@ -254,6 +275,7 @@ def main():
     pairs = analytics.cyclical_pairs(raw)
     flow = analytics.money_flow(raw)
     sec_flow = analytics.sector_flow(raw, assets_meta)
+    cap_flows = analytics.capital_flows(raw)
     rot = analytics.rotation(raw, assets_meta)
     rrg = analytics.build_rrg(raw, assets_meta)
     corr = analytics.build_correlation(raw)
@@ -317,7 +339,8 @@ def main():
     # 5. Samlet datamodell
     today_data = todaymod.build_today(assets, genres, reg, sector_summary,
                                       user_portfolio=user_val, roadmaps=roadmaps,
-                                      money_flow=flow, sector_flow=sec_flow)
+                                      money_flow=flow, sector_flow=sec_flow,
+                                      capital_flows=cap_flows)
     # Live anbefalings-logg: akkumulerer faktiske anbefalinger fremover
     rec_log = append_recommendation_log(today_data, assets, usdnok_now)
     model = {
@@ -335,6 +358,7 @@ def main():
         "cyclical_pairs": pairs,
         "money_flow": flow,
         "sector_flow": sec_flow,
+        "capital_flows": cap_flows,
         "rotation": rot,
         "rrg": rrg,
         "correlation": corr,
@@ -451,6 +475,10 @@ def signals_snapshot(model: dict) -> dict:
     snap["regime_state"] = comp.get("state")
     br = model.get("breadth") or {}
     snap["breadth50"] = br.get("pct_over_50ma")
+    td = model.get("today") or {}
+    snap["buys"] = sorted(b["id"] for b in td.get("buys", []))
+    snap["stages"] = {iid: a.get("stage") for iid, a in model.get("assets", {}).items()
+                      if not a.get("missing_data") and a.get("stage") is not None}
     return snap
 
 
@@ -723,6 +751,19 @@ def compute_changes(prev: dict | None, cur: dict) -> list:
             ch.append(f"▼ Bredde under 50% (over 50d-MA: {p50}% → {c50}%)")
         elif p50 < 50 <= c50:
             ch.append(f"▲ Bredde over 50% (over 50d-MA: {p50}% → {c50}%)")
+    # Kjøp-kandidater inn/ut (høyest prioritet for varsling)
+    pbuys, cbuys = set(prev.get("buys", [])), set(cur.get("buys", []))
+    new_buys = sorted(cbuys - pbuys)
+    gone_buys = sorted(pbuys - cbuys)
+    if new_buys:
+        ch.insert(0, "🎯 NY kjøp-kandidat: " + ", ".join(new_buys))
+    if gone_buys:
+        ch.append("• Ute av kjøp-listen: " + ", ".join(gone_buys))
+    # Stage-overganger til nedtrend (Stage 4) — viktig risiko-varsel
+    pst, cst = prev.get("stages", {}), cur.get("stages", {})
+    to_down = sorted(i for i, s in cst.items() if s == 4 and pst.get(i) not in (None, 4))
+    if to_down:
+        ch.append("⚠ Ny nedtrend (Stage 4): " + ", ".join(to_down))
     return ch
 
 
