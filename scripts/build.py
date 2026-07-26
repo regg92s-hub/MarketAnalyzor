@@ -272,12 +272,12 @@ def main():
     universe = [m["id"] for m in meta_list if not assets.get(m["id"], {}).get("missing_data")]
     breadth = analytics.breadth(raw, universe)
     glob_breadth = analytics.global_breadth(raw, config.BREADTH_GLOBAL_IDS)
-    pairs = analytics.cyclical_pairs(raw)
+    # v13: cyclical_pairs fjernet (redundant med sektor-rotasjon)
     flow = analytics.money_flow(raw)
     sec_flow = analytics.sector_flow(raw, assets_meta)
     cap_flows = analytics.capital_flows(raw)
     rot = analytics.rotation(raw, assets_meta)
-    rrg = analytics.build_rrg(raw, assets_meta)
+    # v13: RRG fjernet fra UI — beregning droppet (nær-kollineær med leaderboard)
     corr = analytics.build_correlation(raw)
     bt = backtestmod.run_backtest(raw, config.CYCLICAL_IDS, top_n=5)
     # Anbefalings-backtest: "hvis alle NSBC-anbefalinger var fulgt"
@@ -355,12 +355,10 @@ def main():
         "genre_strength": genres,
         "breadth": breadth,
         "global_breadth": glob_breadth,
-        "cyclical_pairs": pairs,
         "money_flow": flow,
         "sector_flow": sec_flow,
         "capital_flows": cap_flows,
         "rotation": rot,
-        "rrg": rrg,
         "correlation": corr,
         "backtest": bt,
         "rec_backtest": rec_bt,
@@ -389,6 +387,27 @@ def main():
         json.dump(snapshot, f, ensure_ascii=False, separators=(",", ":"), default=_json_default)
     log(f"signals.json skrevet ({len(changes)} endringer siden forrige bygg)")
     notify_discord(changes, user_val)
+
+    # 5b2 (v14/B4): Ukesoppsummering — fredags-close-digest som matcher ukedisiplinen.
+    # Diff mot forrige ukes referanse-snapshot; oppdateres kun på fre/helg-bygg.
+    wd = load_prev_json("weekly_digest.json", fail_sentinel=True)
+    if wd is _FETCH_FAILED:
+        log("  ADVARSEL: weekly_digest kunne ikke hentes — hopper over for å bevare.")
+        model["weekly_digest"] = None
+    else:
+        wd = wd if isinstance(wd, dict) else {}
+        if NOW.weekday() >= 4:  # fre/lør/søn: uken er stengt — lag digest
+            ref = wd.get("ref")
+            wchanges = compute_changes(ref, snapshot) if ref else []
+            wd = {"week_ending": NOW.strftime("%Y-%m-%d"), "changes": wchanges, "ref": snapshot}
+            with open(DOCS / "weekly_digest.json", "w", encoding="utf-8") as f:
+                json.dump(wd, f, ensure_ascii=False, separators=(",", ":"), default=_json_default)
+            log(f"weekly_digest.json: {len(wchanges)} ukesendringer")
+        else:
+            # midtuke: behold forrige digest uendret på gh-pages (keep_files)
+            pass
+        model["weekly_digest"] = {"week_ending": wd.get("week_ending"),
+                                  "changes": wd.get("changes", [])} if wd.get("week_ending") else None
 
     # 5c. Append dagens NSBC-scorer til historikk (for hit-rate-validering)
     append_score_history(assets)
@@ -479,6 +498,26 @@ def signals_snapshot(model: dict) -> dict:
     snap["buys"] = sorted(b["id"] for b in td.get("buys", []))
     snap["stages"] = {iid: a.get("stage") for iid, a in model.get("assets", {}).items()
                       if not a.get("missing_data") and a.get("stage") is not None}
+    # v13: tilstand for BEHOLDTE posisjoner — grunnlag for posisjonsspesifikke varsler
+    held = {}
+    uv = model.get("user_portfolio") or {}
+    assets = model.get("assets", {})
+    roadmaps = model.get("roadmaps", {})
+    sym2iid = {a.get("symbol_label", iid): iid for iid, a in assets.items()}
+    for row in uv.get("rows", []):
+        iid = sym2iid.get(row.get("sym"))
+        if not iid or iid not in assets:
+            continue
+        a = assets[iid]
+        ps = a.get("price_series") or []
+        last = ps[-1][1] if ps else None
+        inval = ((roadmaps.get(iid) or {}).get("nominal") or {}).get("invalidation")
+        held[iid] = {
+            "stretched": bool(a.get("stretched")),
+            "stage": a.get("stage"),
+            "inval_breach": (last is not None and inval is not None and last < inval),
+        }
+    snap["held"] = held
     return snap
 
 
@@ -514,6 +553,11 @@ def append_recommendation_log(today_data, assets, usdnok_now):
         return ps[-1][1] if ps else None
 
     held = rlog["holdings"]
+    # v13 Weinstein-disiplin: signaler bekreftes på UKENTLIG close. Beholdnings-
+    # endringer gjøres kun på fredag/helg-bygg; midtuke revalueres kun (mindre støy/churn).
+    weekly_confirm = NOW.weekday() >= 4  # fre=4, lør=5, søn=6
+    if not weekly_confirm:
+        buys = set(held.keys())  # frys beholdningen midtuke
     # Selg det som ikke lenger anbefales
     for iid in list(held.keys()):
         if iid not in buys:
@@ -554,6 +598,21 @@ def append_recommendation_log(today_data, assets, usdnok_now):
         rlog["curve"].append([today, round(new_val, 3)])
     rlog["curve"] = rlog["curve"][-1095:]
     rlog["_last_prices"] = cur_prices
+    # v13: benchmark-kurver (SPY/GLD) side om side — en kurve uten benchmark er ikke tolkbar
+    for bkey, biid in (("bench_spy", "SPY"), ("bench_gold", "GLD")):
+        rlog.setdefault(bkey, [])
+        bp = price(biid)
+        if bp:
+            lastp = rlog.get(f"_last_{biid}")
+            lastv = rlog[bkey][-1][1] if rlog[bkey] else 100.0
+            bret = (bp / lastp - 1) if (lastp and lastp > 0) else 0.0
+            bval = round(lastv * (1 + bret), 3)
+            if rlog[bkey] and rlog[bkey][-1][0] == today:
+                rlog[bkey][-1] = [today, bval]
+            else:
+                rlog[bkey].append([today, bval])
+            rlog[bkey] = rlog[bkey][-1095:]
+            rlog[f"_last_{biid}"] = bp
     rlog["events"] = rlog["events"][-200:]
     rlog["closed"] = rlog["closed"][-200:]
 
@@ -562,9 +621,21 @@ def append_recommendation_log(today_data, assets, usdnok_now):
     with open(hdir / "recommendation_log.json", "w", encoding="utf-8") as f:
         json.dump(rlog, f, separators=(",", ":"), default=_json_default)
     log(f"recommendation_log.json: {len(rlog['curve'])} dager, {len(held)} aktive posisjoner")
+    closed_all = [c for c in rlog.get("closed", []) if c.get("ret_pct") is not None]
+    wins = [c["ret_pct"] for c in closed_all if c["ret_pct"] > 0]
+    losses = [c["ret_pct"] for c in closed_all if c["ret_pct"] <= 0]
+    closed_stats = {
+        "n": len(closed_all),
+        "win_rate": round(100 * len(wins) / len(closed_all), 1) if closed_all else None,
+        "avg_win": round(sum(wins) / len(wins), 1) if wins else None,
+        "avg_loss": round(sum(losses) / len(losses), 1) if losses else None,
+    }
     return {
         "inception": rlog["inception"],
         "curve": rlog["curve"],
+        "closed_stats": closed_stats,
+        "bench_spy": rlog.get("bench_spy", []),
+        "bench_gold": rlog.get("bench_gold", []),
         "active": sorted(held.keys()),
         "n_active": len(held),
         "recent_events": rlog["events"][-10:],
@@ -764,6 +835,23 @@ def compute_changes(prev: dict | None, cur: dict) -> list:
     to_down = sorted(i for i, s in cst.items() if s == 4 and pst.get(i) not in (None, 4))
     if to_down:
         ch.append("⚠ Ny nedtrend (Stage 4): " + ", ".join(to_down))
+    # v13: POSISJONSSPESIFIKKE varsler på beholdninger — «action required»-hendelsene.
+    # Kun på overganger (False->True) for å unngå daglig gjentakelse.
+    ph, chd = prev.get("held", {}), cur.get("held", {})
+    inval_new = sorted(i for i, s in chd.items()
+                       if s.get("inval_breach") and not (ph.get(i) or {}).get("inval_breach"))
+    if inval_new:
+        ch.insert(0, "🚨 INVALIDERING BRUTT på din posisjon: " + ", ".join(inval_new)
+                  + " — prisen er under roadmapens invalideringsnivå. Revurder posisjonen.")
+    stretch_new = sorted(i for i, s in chd.items()
+                         if s.get("stretched") and not (ph.get(i) or {}).get("stretched"))
+    if stretch_new:
+        ch.append("🚨 Din posisjon er nå STRUKKET (FOMO-sone): " + ", ".join(stretch_new)
+                  + " — vurder å sikre gevinst / stram stopp.")
+    held_down = sorted(i for i, s in chd.items()
+                       if s.get("stage") == 4 and (ph.get(i) or {}).get("stage") not in (None, 4))
+    if held_down:
+        ch.insert(0, "🚨 Din posisjon gikk inn i NEDTREND (Stage 4): " + ", ".join(held_down))
     return ch
 
 

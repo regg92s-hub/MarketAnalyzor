@@ -12,7 +12,7 @@ Endringer fra market-daily-report (v8 -> analysor):
   - Lightweight Charts i stedet for matplotlib-PNG-er
 """
 
-VERSION = "2026-06-19-analysor-v8"
+VERSION = "2026-07-26-analysor-v14"
 
 # ──────────────────────────────────────────────────────────────────
 # INSTRUMENT-UNIVERS
@@ -299,3 +299,29 @@ def all_instruments():
             d["subclass"] = ASSET_SUBCLASS.get(inst["id"], "")
             out.append(d)
     return out
+
+
+# ── C1 (v14): Norsk kjøpbarhet — PRIIPs/KID-blokk + ASK-kvalifisering ────────
+# Norske retail-investorer kan IKKE kjøpe US-noterte ETF-er (PRIIPs/KID-krav
+# siden 1. okt 2024; eksisterende beholdning kan holdes/selges). Aksjesparekonto
+# (ASK) krever i tillegg EØS-hjemmehørende fond med >=80% aksjeandel.
+# alt = verifisert UCITS-ekvivalent (Irland/Lux) der en finnes.
+# Default for alt som IKKE står her: US-domisilert -> buyable=False, ask=False.
+NO_ACCESS_DEFAULT = {"buyable": False, "ask": False, "alt": None}
+NO_ACCESS = {
+    "EXSA": {"buyable": True, "ask": True, "alt": None},  # iShares STOXX Europe 600, EØS-domisilert
+    "BTC":  {"buyable": True, "ask": False, "alt": "kryptobørs (utenfor PRIIPs)"},
+    "ETHA": {"buyable": True, "ask": False, "alt": "kryptobørs (utenfor PRIIPs)"},
+    "SPY":  {"buyable": False, "ask": False, "alt": "CSPX (IE00B5BMR087) / VUAA (IE00BFMXXD54)"},
+    "QQQ":  {"buyable": False, "ask": False, "alt": "EQQQ (IE0032077012) / CNDX (IE00B53SZB19)"},
+    "SOXX": {"buyable": False, "ask": False, "alt": "VVSM VanEck Semiconductor UCITS (IE00BMC38736)"},
+    "GDX":  {"buyable": False, "ask": False, "alt": "G2X VanEck Gold Miners UCITS (IE00BQQP9F84)"},
+    "GDXJ": {"buyable": False, "ask": False, "alt": "G2XJ VanEck Junior Gold Miners UCITS (IE00BQQP9G91)"},
+    "EEM":  {"buyable": False, "ask": False, "alt": "EIMI iShares Core MSCI EM IMI (IE00BKM4GZ66)"},
+    "GLD":  {"buyable": False, "ask": False, "alt": "IGLN iShares Physical Gold ETC (IE00B4ND3602) — ETC, ikke ASK"},
+}
+
+
+def no_access(iid: str) -> dict:
+    """Kjøpbarhets-info for norsk retail. Se NO_ACCESS-kommentaren."""
+    return NO_ACCESS.get(iid, NO_ACCESS_DEFAULT)

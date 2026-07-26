@@ -205,5 +205,12 @@ def build_benchmarks(raw: dict, fred_fetch, api_key: str) -> dict:
     if raw.get("GLD") is not None:
         out["gold_usd"] = _monthly_pairs(raw["GLD"]["close_use"])
 
-    out["nowa"] = fetch_nowa()
+    nowa = fetch_nowa()
+    # v14-sanity: NOWA skal ligge nær styringsrenten (4-5% i 2026). Verdier utenfor
+    # 0-8% er nesten sikkert feil nøkkel/enhet fra API-et — da heller ingen verdi
+    # enn feil verdi (6.00% på live-siden forvrengte alle Sharpe-tall).
+    if nowa is not None and not (0.0 < nowa < 8.0):
+        print(f"  ADVARSEL: NOWA={nowa} utenfor sanity-området (0-8%) — forkastes")
+        nowa = None
+    out["nowa"] = nowa
     return out

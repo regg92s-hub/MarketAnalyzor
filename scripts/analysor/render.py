@@ -101,10 +101,24 @@ def render_today(data) -> str:
     buys = td.get("buys", [])
     out.append(f'<div class="today-col"><h3 style="color:{PALETTE["up"]};margin-top:0">▲ Kjøp-kandidater</h3>')
     if buys:
+        prov = buys[0].get("provisional")
+        if prov:
+            out.append(f'<div class="muted" style="font-size:11px;margin-bottom:4px">⏳ Foreløpig — '
+                       'NSBC-signalene er ukentlige og bekreftes på fredagens close (Weinstein-disiplin).</div>')
         for b in buys:
+            na = b.get("no_access") or {}
+            if na.get("ask"):
+                chip = f'<span style="font-size:10px;color:{PALETTE["up"]}">🇳🇴 ASK ✓</span>'
+            elif na.get("buyable"):
+                chip = '<span style="font-size:10px;color:var(--muted)">🇳🇴 kjøpbar · ikke ASK</span>'
+            else:
+                alt = na.get("alt")
+                chip = (f'<span style="font-size:10px;color:{PALETTE["warn"]}">🇳🇴 PRIIPs-blokkert'
+                        + (f' → {html.escape(alt)}' if alt else ' · ingen kjent UCITS-ekvivalent') + '</span>')
             out.append(f'<div class="today-item"><a href="report.html#{b["id"]}" style="font-weight:700;color:var(--text);text-decoration:none">{html.escape(b["sym"])}</a> '
                        f'<span class="pill" style="background:{PALETTE["up"]}22;color:{PALETTE["up"]}">{b["score"]}</span>'
-                       f'<div class="muted" style="font-size:11px">{html.escape(b.get("why",""))} · {html.escape(b.get("sector",""))}</div></div>')
+                       f'<div class="muted" style="font-size:11px">{html.escape(b.get("why",""))} · {html.escape(b.get("sector",""))}</div>'
+                       f'<div>{chip}</div></div>')
     else:
         out.append('<p class="muted" style="font-size:12px">Ingen kvalifiserte i lavrisiko-entry nå. Tålmodighet.</p>')
     out.append('</div>')
@@ -127,14 +141,28 @@ def render_today(data) -> str:
     if uv and uv.get("rows"):
         actions = [r for r in uv["rows"] if r["verdict"] in ("SKALER AV", "VURDER SKALER AV")]
         if actions:
+            sym2f52 = {row.get("sym"): row.get("from52wh") for row in (td.get("leaderboard") or [])}
             for r in actions:
                 rc = PALETTE["down"] if r["verdict"] == "SKALER AV" else PALETTE["warn"]
+                f52 = sym2f52.get(r["sym"])
+                dd = (f' · <span style="color:{PALETTE["warn"] if f52 <= -10 else "var(--muted)"}">'
+                      f'{f52:.0f}% fra 52u-topp</span>') if f52 is not None else ""
                 out.append(f'<div class="today-item"><span style="font-weight:700">{html.escape(r["sym"])}</span> '
                            f'<span style="color:{rc};font-size:11px">{html.escape(r["verdict"])}</span>'
-                           f'<div class="muted" style="font-size:11px">{html.escape(r.get("why",""))} · {r["pnl_pct"]:+.1f}%</div></div>')
+                           f'<div class="muted" style="font-size:11px">{html.escape(r.get("why",""))} · {r["pnl_pct"]:+.1f}%{dd}</div></div>')
         else:
             out.append(f'<p class="muted" style="font-size:12px">Ingen posisjoner krever handling. '
                        f'Total {uv.get("total_nok",0):,.0f} kr.</p>')
+        # C3: porteføljens drawdown fra topp (fra faktisk NAV-kurve)
+        ac = (data.get("paper") or {}).get("actual_curve") or []
+        if len(ac) >= 5:
+            vals = [p[1] for p in ac if p[1]]
+            if vals:
+                peak = max(vals)
+                dd = (vals[-1] / peak - 1) * 100 if peak > 0 else 0
+                ddc = PALETTE["up"] if dd > -5 else (PALETTE["warn"] if dd > -15 else PALETTE["down"])
+                out.append(f'<div style="font-size:12px;margin-top:4px">Portefølje-drawdown: '
+                           f'<strong style="color:{ddc}">{dd:.1f}%</strong> fra topp</div>')
     else:
         out.append('<p class="muted" style="font-size:12px">Synk porteføljen din for å se posisjons-varsler her.</p>')
     out.append('</div>')
@@ -143,6 +171,22 @@ def render_today(data) -> str:
 
     # ── LAG 2: Sorterbar leaderboard ──────────────────────────────
     lb = td.get("leaderboard", [])
+    # 📅 Ukesoppsummering (B4): fredags-close-digest — matcher ukedisiplinen
+    wd = data.get("weekly_digest")
+    if wd and wd.get("week_ending") and not wd.get("changes"):
+        out.append(f'<div class="muted" style="font-size:11.5px;margin-bottom:10px">📅 Ukesoppsummering '
+                   f'(uke til {html.escape(wd["week_ending"])}): ingen signalendringer — trendene står.</div>')
+    if wd and wd.get("changes"):
+        out.append(f'<details class="section" style="padding:10px 14px" open>'
+                   f'<summary style="cursor:pointer;font-weight:700">📅 Ukesoppsummering — uke til '
+                   f'{html.escape(wd.get("week_ending",""))}</summary>'
+                   '<div style="margin-top:6px">')
+        for c in wd["changes"][:10]:
+            cls = "up" if c.startswith(("▲", "🎯")) else ("down" if c.startswith(("▼", "⚠", "🚨")) else "muted")
+            out.append(f'<div class="{cls}" style="font-size:12.5px;padding:2px 0">{html.escape(c)}</div>')
+        out.append('<div class="muted" style="font-size:11px;margin-top:4px">Oppdateres på fredagens '
+                   'close (Weinstein-ukedisiplin). Dette er ukens fasit — midtukens diff er støy.</div></div></details>')
+
     # Guidet arbeidsflyt (Start her)
     out.append('<details class="section" style="padding:10px 14px"><summary style="cursor:pointer;font-weight:700">'
                '🧭 Start her — slik bruker du verktøyet</summary>'
@@ -187,8 +231,8 @@ def _leaderboard_table(lb) -> str:
     return (f'<input id="lbFilter" type="text" placeholder="Filtrer på symbol eller sjanger..." '
             f'style="width:100%;max-width:340px;padding:7px 10px;margin:0 0 8px;background:var(--panel2);'
             f'border:1px solid var(--border);border-radius:7px;color:var(--text);font-size:13px">'
-            f'<div style="overflow-x:auto"><table id="lbTable" class="lb"><thead><tr>{th}</tr></thead>'
-            f'<tbody></tbody></table></div>'
+            f'<div class="lb-table-wrap" style="overflow-x:auto"><table id="lbTable" class="lb"><thead><tr>{th}</tr></thead>'
+            f'<tbody></tbody></table></div><div id="lbCards" class="lb-cards"></div>'
             f'<script>const LB={_json.dumps(lb)};{_leaderboard_js()}</script>')
 
 
@@ -230,6 +274,17 @@ def _leaderboard_js() -> str:
         ${cell(beats)}${cell(mans)}${cell(roc)}${cell(dist)}${cell(f52)}
         <td class="muted" style="font-size:11px">${r.sector||''}</td></tr>`;
     }).join('');
+    const cards=document.getElementById('lbCards');
+    if(cards){ cards.innerHTML=rows.map(r=>{
+      const st=r.stage==null?'–':('Stage '+r.stage);
+      const f52=r.from52wh==null?'–':(r.from52wh.toFixed(0)+'% fra topp');
+      const cc=r.composite>=70?upC:(r.composite>=50?warnC:mutC);
+      return '<a class="lb-card" href="report.html#'+r.id+'">'
+        +'<div class="lb-card-top"><span class="lb-card-sym">'+r.sym+'</span>'
+        +'<span class="lb-card-comp" style="color:'+cc+'">'+r.composite.toFixed(0)+'</span></div>'
+        +'<div class="lb-card-sub">'+st+' · score '+r.score+' · '+f52+'</div>'
+        +'<div class="lb-card-sub" style="color:'+mutC+'">'+(r.sector||'')+'</div></a>';
+    }).join(''); }
     document.querySelectorAll('#lbTable th').forEach(th=>{
       const ar=th.querySelector('.sort-ar'); if(ar) ar.textContent = th.dataset.k===sortK?(sortDir<0?'▼':'▲'):''; });
   }
@@ -274,8 +329,7 @@ def render_trend(data) -> str:
             out.append(f'<div class="{cls}" style="padding:4px 0;font-weight:600;font-size:14px">{html.escape(c)}</div>')
         out.append('</section>')
 
-    # 🎯 Triage: hva bør jeg vurdere i dag (én handlingsliste)
-    out.append(_triage_view(data))
+    # (Triage-visningen er fjernet i v13 — redundant med I dag-kommandobåndet)
 
     # Regime-stripe
     reg = data.get("regime", {})
@@ -459,107 +513,21 @@ def render_trend(data) -> str:
     out.append(_ranking_table(data.get("ranking_dxy", {}), "💵 vs Dollar (UUP)", "UUP"))
     out.append('</div></section>')
 
-    # RRG-scatter (leadership som rotasjonsgraf)
-    out.append(_rrg_section(data.get("rrg", {})))
-
-    # Korrelasjonsmatrise
-    out.append(_corr_section(data.get("correlation", {})))
-
-    # Sykliske par
-    cp = data.get("cyclical_pairs", [])
-    if cp:
-        out.append('<section class="section"><h2>⚖️ Sykliske par (intern rotasjon)</h2>'
-                   '<p class="sub">Instrument vs instrument — hvem leder innad. Composite = vektet ROC.</p>'
-                   '<table><thead><tr><th>Par</th><th style="text-align:right">1M</th>'
-                   '<th style="text-align:right">3M</th><th>Leder</th></tr></thead><tbody>')
-        for p in cp:
-            comp = p.get("composite") or 0
-            leader = p["a"] if comp > 0 else p["b"]
-            lcls = "up" if comp > 0 else "down"
-            out.append(f'<tr><td><strong>{html.escape(p["label"])}</strong> '
-                       f'<span class="muted">{html.escape(p["a"])}/{html.escape(p["b"])}</span></td>'
-                       f'{_roc_cell(p.get("roc_1m"))}{_roc_cell(p.get("roc_3m"))}'
-                       f'<td class="{lcls}">{html.escape(leader)}</td></tr>')
-        out.append('</tbody></table></section>')
+    # v13: RRG og sykliske par er FJERNET (nær-kollineære med leaderboard +
+    # sektor-rotasjon — samme relative momentum målt på fjerde og femte måte).
+    # Korrelasjonsmatrisen demoteres til expander (brukes ved rebalansering, ikke daglig).
+    corr_html = _corr_section(data.get("correlation", {}))
+    if corr_html:
+        out.append('<details class="section" style="padding:10px 14px">'
+                   '<summary style="cursor:pointer;font-weight:700">🔗 Korrelasjonsmatrise '
+                   '<span class="muted" style="font-weight:400">(for rebalansering — ikke et daglig signal)</span></summary>'
+                   + corr_html + '</details>')
 
     # 📊 Hit-rate-validering (treffsikkerhet over tid)
     out.append(_hitrate_section(data.get("validation", {})))
 
     out.append(layout.foot())
     return "".join(out)
-
-
-def _triage_view(data) -> str:
-    """🎯 Hva bør jeg vurdere i dag — én fusjonert handlingsliste.
-    Nye lavrisiko-entries, stretched/FOMO-exit-kandidater, og dine posisjoner."""
-    assets = data.get("assets", {})
-    uv = data.get("user_portfolio")
-    roadmaps = data.get("roadmaps", {})
-
-    entries, exits, holds_action = [], [], []
-    for iid, a in assets.items():
-        if a.get("missing_data"):
-            continue
-        sc = a.get("northstar_score", 0)
-        sym = a.get("symbol_label", iid)
-        # Nye lavrisiko-entries: høy score + breakout + ikke stretched + LT konstruktiv
-        if sc >= 70 and a.get("breakout") and not a.get("stretched"):
-            entries.append((sc, sym, iid, a.get("state_label", "")))
-        # Exit-kandidater: stretched i FOMO-sonen
-        if a.get("stretched") and a.get("st_state") != "bear":
-            exits.append((a.get("dist36_w") or 0, sym, iid))
-
-    # Dine posisjoner som krever handling
-    if uv and uv.get("rows"):
-        for r in uv["rows"]:
-            if r["verdict"] in ("SKALER AV", "VURDER SKALER AV"):
-                holds_action.append(r)
-
-    if not (entries or exits or holds_action):
-        return ('<section class="section"><h2>🎯 Hva bør jeg vurdere i dag</h2>'
-                '<p class="sub">Ingen nye lavrisiko-entries, FOMO-exit-kandidater eller '
-                'posisjons-varsler akkurat nå. Tålmodighet er en posisjon.</p></section>')
-
-    parts = ['<section class="section" style="border:2px solid var(--good)">'
-             '<h2>🎯 Hva bør jeg vurdere i dag</h2>'
-             '<p class="sub">Fusjonert handlingsliste: nye lavrisiko-entries (NSBC: breakout + '
-             'ikke stretched), FOMO-exit-kandidater, og dine posisjoner. '
-             'Hver rad lenker til roadmap-nivåene. <strong>Ikke finansrådgivning.</strong></p>']
-
-    if entries:
-        entries.sort(reverse=True)
-        parts.append(f'<h3 style="color:{PALETTE["up"]};margin-top:8px">▲ Nye lavrisiko-entries</h3>')
-        for sc, sym, iid, state in entries[:8]:
-            rm = roadmaps.get(iid, {}).get("nominal", {})
-            tgt = ""
-            if rm and rm.get("scenarios", {}).get("base", {}).get("target"):
-                b = rm["scenarios"]["base"]
-                pct = b.get("pct")
-                pct_s = f' ({pct:+.0f}%)' if isinstance(pct, (int, float)) else ""
-                tgt = f' <span class="muted">base-mål {b["target"]:g}{pct_s}</span>'
-            parts.append(f'<div style="padding:3px 0"><strong>{html.escape(sym)}</strong> '
-                         f'<span class="pill" style="background:{PALETTE["up"]}22;color:{PALETTE["up"]}">score {sc}</span> '
-                         f'<span class="muted" style="font-size:12px">{html.escape(state)}</span>{tgt}</div>')
-
-    if exits:
-        exits.sort(reverse=True)
-        parts.append(f'<h3 style="color:{PALETTE["warn"]};margin-top:10px">⚠ FOMO-sone (vurder å skalere av)</h3>')
-        for dist, sym, iid in exits[:8]:
-            parts.append(f'<div style="padding:3px 0"><strong>{html.escape(sym)}</strong> '
-                         f'<span class="warn">stretched {dist:+.1f}% fra 36-MA</span> '
-                         f'<span class="muted" style="font-size:12px">— høy risiko å gå inn, vurder profittsikring</span></div>')
-
-    if holds_action:
-        parts.append(f'<h3 style="color:{PALETTE["down"]};margin-top:10px">💼 Dine posisjoner</h3>')
-        for r in holds_action:
-            col = PALETTE["down"] if r["verdict"] == "SKALER AV" else PALETTE["warn"]
-            parts.append(f'<div style="padding:3px 0;color:{col};font-weight:600">'
-                         f'{html.escape(r["sym"])}: {html.escape(r["verdict"])} '
-                         f'<span class="muted" style="font-weight:400">({html.escape(r["why"])}, '
-                         f'{r["pnl_pct"]:+.1f}%)</span></div>')
-
-    parts.append('</section>')
-    return "".join(parts)
 
 
 def _hitrate_section(val) -> str:
@@ -680,21 +648,9 @@ def _decision_dashboard(data) -> str:
         parts.append('<p class="sub" style="margin-top:14px">💡 Synk porteføljen din '
                      '(docs/portfolio.json) for å se posisjons-varsler her og i Discord.</p>')
 
-    # Rad 3: regelen vs deg
-    curve = paper.get("curve") or []
-    actual = paper.get("actual_curve") or []
-    if curve:
-        start = paper.get("start_nok") or 100000
-        rule_now = curve[-1][1]
-        rule_ret = (rule_now / start - 1) * 100
-        line = (f'Regelen (paper): <strong style="color:{PALETTE["up"] if rule_ret>=0 else PALETTE["down"]}">'
-                f'{rule_ret:+.1f}%</strong> siden {curve[0][0]}')
-        if actual and uv:
-            # felles startpunkt-sammenligning er upresis; vis bare nivåer
-            line += f' · din portefølje nå: {uv.get("total_nok",0):,.0f} kr'
-        parts.append(f'<h3 style="margin-top:14px">Regelen vs. deg</h3>'
-                     f'<p class="sub">{line}. Hypotetisk regelportefølje som rebalanserer '
-                     'mekanisk månedlig — speil for din egen disiplin.</p>')
+    # v13: «Regelen vs deg» (paper-ledger) er FJERNET fra UI — duplisert av den
+    # live anbefalings-porteføljen på Backtest-fanen, som sporer de faktiske
+    # anbefalingene i stedet for en hypotetisk regel. Tilstandsfilen beholdes.
 
     parts.append('</section>')
     return "".join(parts)
@@ -976,69 +932,6 @@ CHARTS.forEach(c=>{ const el=document.getElementById(c.el); if(el) io.observe(el
 
 
 # ── RRG-scatter (SVG, ingen ekstern lib) ──────────────────────────
-def _rrg_section(rrg) -> str:
-    pts = (rrg or {}).get("points", [])
-    if not pts:
-        return ""
-    # Skala: finn min/max rundt 100, med marginer
-    xs = [p["rs_ratio"] for p in pts]
-    ys = [p["rs_momentum"] for p in pts]
-    xmin, xmax = min(94, min(xs) - 1), max(106, max(xs) + 1)
-    ymin, ymax = min(94, min(ys) - 1), max(106, max(ys) + 1)
-    W, H, pad = 680, 460, 44
-
-    def sx(v):
-        return pad + (v - xmin) / (xmax - xmin) * (W - 2 * pad)
-
-    def sy(v):
-        return H - pad - (v - ymin) / (ymax - ymin) * (H - 2 * pad)
-
-    x100, y100 = sx(100), sy(100)
-    # Kvadrant-farger (colorblind-trygge, lav metning)
-    quad_cols = {"Leading": "#0072B2", "Weakening": "#E69F00",
-                 "Lagging": "#D55E00", "Improving": "#56B4E9"}
-    svg = [f'<svg viewBox="0 0 {W} {H}" width="100%" style="max-width:700px;background:var(--panel2);border-radius:10px">']
-    # kvadrant-bakgrunner
-    svg.append(f'<rect x="{x100}" y="{pad}" width="{W-pad-x100}" height="{y100-pad}" fill="#0072B215"/>')
-    svg.append(f'<rect x="{x100}" y="{y100}" width="{W-pad-x100}" height="{H-pad-y100}" fill="#E69F0015"/>')
-    svg.append(f'<rect x="{pad}" y="{y100}" width="{x100-pad}" height="{H-pad-y100}" fill="#D55E0015"/>')
-    svg.append(f'<rect x="{pad}" y="{pad}" width="{x100-pad}" height="{y100-pad}" fill="#56B4E915"/>')
-    # akse-kryss
-    svg.append(f'<line x1="{x100}" y1="{pad}" x2="{x100}" y2="{H-pad}" stroke="#3a4452" stroke-dasharray="4 4"/>')
-    svg.append(f'<line x1="{pad}" y1="{y100}" x2="{W-pad}" y2="{y100}" stroke="#3a4452" stroke-dasharray="4 4"/>')
-    # kvadrant-etiketter
-    svg.append(f'<text x="{W-pad-6}" y="{pad+16}" fill="#0072B2" font-size="12" text-anchor="end" font-weight="700">LEADING</text>')
-    svg.append(f'<text x="{W-pad-6}" y="{H-pad-6}" fill="#E69F00" font-size="12" text-anchor="end" font-weight="700">WEAKENING</text>')
-    svg.append(f'<text x="{pad+6}" y="{H-pad-6}" fill="#D55E00" font-size="12" font-weight="700">LAGGING</text>')
-    svg.append(f'<text x="{pad+6}" y="{pad+16}" fill="#56B4E9" font-size="12" font-weight="700">IMPROVING</text>')
-    # akse-titler
-    svg.append(f'<text x="{W/2}" y="{H-8}" fill="var(--muted)" font-size="11" text-anchor="middle">RS-Ratio (relativ styrke) →</text>')
-    svg.append(f'<text x="14" y="{H/2}" fill="var(--muted)" font-size="11" text-anchor="middle" transform="rotate(-90 14 {H/2})">RS-Momentum →</text>')
-    # punkter med haler
-    for p in pts:
-        col = quad_cols.get(p["quadrant"], "#999")
-        px, py = sx(p["rs_ratio"]), sy(p["rs_momentum"])
-        tail = p.get("tail", [])
-        if len(tail) >= 2:
-            pl = " ".join(f"{sx(a)},{sy(b)}" for a, b in tail)
-            svg.append(f'<polyline points="{pl}" fill="none" stroke="{col}" stroke-width="1.5" opacity="0.45"/>')
-        svg.append(f'<circle cx="{px}" cy="{py}" r="5" fill="{col}" stroke="#0b0d10" stroke-width="1.5"/>')
-        svg.append(f'<text x="{px+8}" y="{py+4}" fill="var(--text)" font-size="11" font-weight="600">{html.escape(p["label"])}</text>')
-    svg.append('</svg>')
-    return ('<section class="section"><h2>🔄 RRG — Relative Rotation Graph (vs gull)</h2>'
-            '<p class="sub">RS-Ratio (relativ styrke) på x-aksen, RS-Momentum (endringstakt) på y-aksen, '
-            'sentrert på 100. Instrumenter roterer mot klokka: Improving → Leading → Weakening → Lagging. '
-            'Halen viser de siste punktene (retning). Ett blikk gir hele lederskapsbildet.</p>'
-            + "".join(svg) +
-            '<details><summary>Hvordan lese RRG</summary>'
-            '<p class="sub" style="margin-top:8px">Øvre høyre (Leading, blå) = slår gull med positivt momentum — '
-            'sterkest. Nedre høyre (Weakening, oransje) = fortsatt over, men momentum avtar. Nedre venstre '
-            '(Lagging, vermillion) = svakest. Øvre venstre (Improving, lyseblå) = under gull, men på vei opp — '
-            'tidlige vendingskandidater. En sunn opptrend roterer Improving → Leading.</p></details>'
-            '</section>')
-
-
-# ── Korrelasjonsmatrise (SVG heatmap) ─────────────────────────────
 def _corr_section(corr) -> str:
     ids = (corr or {}).get("ids", [])
     mat = (corr or {}).get("matrix", [])
@@ -1084,10 +977,15 @@ def _corr_section(corr) -> str:
 def render_backtest(data) -> str:
     P = layout.head("Backtest", 5)
     bt = data.get("backtest", {})
-    out = [P, '<h1>🧪 Backtest — walk-forward</h1>',
-           '<p class="sub">Ærlig out-of-sample-test av en enkel, økonomisk motivert rotasjonsregel: '
-           'eier topp-N sykliske mot gull (3M+6M momentum), med absolutt-momentum-filter (dual momentum) '
-           'og volatilitetsskalering mot momentum-krasj. Ingen parameteroptimalisering på testdata.</p>']
+    out = [P, '<h1>🧪 Backtest &amp; sporing</h1>',
+           '<p class="sub">Rekkefølge etter relevans: den <strong>live anbefalings-porteføljen</strong> '
+           '(sporer systemets faktiske råd framover), <strong>anbefalings-backtesten</strong> '
+           '(rekonstruerer signalene historisk), og til slutt den mekaniske rotasjonsregelen som '
+           'referanse — den har ikke slått kjøp-og-hold risikojustert og er demotert deretter.</p>']
+
+    # v13: Live sporing og anbefalings-backtest først — det er systemets egen fasit.
+    out.append(_rec_log_section(data.get("rec_log")))
+    out.append(_rec_backtest_section(data.get("rec_backtest", {})))
 
     if not bt.get("available"):
         out.append(f'<section class="section"><p class="down">Backtest utilgjengelig: '
@@ -1096,7 +994,7 @@ def render_backtest(data) -> str:
         return "".join(out)
 
     s, sp, g = bt["strategy"], bt["spy"], bt["gold"]
-    out.append('<section class="section"><h2>Resultater</h2>'
+    out.append('<section class="section"><h2>Referanse: mekanisk rotasjonsregel (demotert)</h2>'
                f'<p class="sub">Periode {bt["start"]} → {bt["end"]} ({bt["months"]} måneder), '
                f'topp-{bt["top_n"]}, snitt {bt["avg_holdings"]} posisjoner. Månedlig rebalansering med '
                f'<strong>value-tilt</strong> (vekt {bt.get("value_weight","–")} på reversal, Asness), '
@@ -1142,13 +1040,6 @@ def render_backtest(data) -> str:
     out.append(layout.lwc_script())
     out.append('<script>\nconst BT = ' + json.dumps(series) + ';\n' + _bt_chart_js() + '\n</script>')
 
-    # ── ANBEFALINGS-BACKTEST: "hvis alle anbefalinger var fulgt" ──
-    rb = data.get("rec_backtest", {})
-    out.append(_rec_backtest_section(rb))
-
-    # ── LIVE anbefalings-logg: akkumulerer faktiske anbefalinger fremover ──
-    out.append(_rec_log_section(data.get("rec_log")))
-
     out.append(layout.foot())
     return "".join(out)
 
@@ -1175,9 +1066,13 @@ def _rec_log_section(rl) -> str:
              f'<p class="muted" style="font-size:12px">{rl.get("n_active",0)} aktive posisjoner: '
              f'{html.escape(", ".join(rl.get("active",[])[:20]))}</p>']
     if len(curve) >= 2:
-        parts.append('<div class="lwc" id="reclog_chart" style="height:300px"></div>')
-        rser = [[c[0], c[1]] for c in curve]
-        parts.append('<script>\nconst RECLOG = ' + json.dumps(rser) + ';\n'
+        parts.append('<div class="lwc" id="reclog_chart" style="height:300px"></div>'
+                     '<div style="font-size:11px;color:var(--muted);margin:2px 0">'
+                     '🟩 Anbefalinger · 🟦 SPY · 🟧 Gull (alle indeksert 100 fra oppstart). '
+                     'Beholdningsendringer bekreftes kun på ukentlig close (Weinstein-disiplin).</div>')
+        rdata = {"sys": [[c[0], c[1]] for c in curve],
+                 "spy": rl.get("bench_spy", []), "gold": rl.get("bench_gold", [])}
+        parts.append('<script>\nconst RECLOG = ' + json.dumps(rdata) + ';\n'
                      '(function(){function initRL(){var el=document.getElementById("reclog_chart");'
                      'if(!el||!window.LightweightCharts)return;'
                      'var chart=LightweightCharts.createChart(el,{height:300,'
@@ -1186,11 +1081,27 @@ def _rec_log_section(rl) -> str:
                      'rightPriceScale:{borderColor:"#262d36"},timeScale:{borderColor:"#262d36"}});'
                      'var s=chart.addAreaSeries({lineColor:"#009E73",topColor:"rgba(0,158,115,0.3)",'
                      'bottomColor:"rgba(0,158,115,0.02)",lineWidth:2});'
-                     's.setData(RECLOG.map(function(p){return {time:p[0],value:p[1]};}));'
+                     's.setData(RECLOG.sys.map(function(p){return {time:p[0],value:p[1]};}));'
+                     'var mk=function(d,c){if(!d||d.length<2)return;'
+                     'var l=chart.addLineSeries({color:c,lineWidth:1});'
+                     'l.setData(d.map(function(p){return {time:p[0],value:p[1]};}));};'
+                     'mk(RECLOG.spy,"#56B4E9");mk(RECLOG.gold,"#E69F00");'
                      'chart.timeScale().fitContent();'
                      'new ResizeObserver(function(){chart.applyOptions({width:el.clientWidth});}).observe(el);}'
                      'if(window.LightweightCharts)initRL();else window.addEventListener("load",initRL);})();'
                      '\n</script>')
+    # C4: realisert treffprosent — vises først når n >= 20 (småutvalg lyver)
+    cs = rl.get("closed_stats") or {}
+    if cs.get("n", 0) >= 20:
+        wr = cs.get("win_rate")
+        wrc = PALETTE["up"] if (wr or 0) >= 50 else PALETTE["warn"]
+        parts.append(f'<div style="margin:6px 0;font-size:13px">Realisert (n={cs["n"]}): '
+                     f'<strong style="color:{wrc}">{wr}% treff</strong> · '
+                     f'snitt gevinst {cs.get("avg_win","–")}% · snitt tap {cs.get("avg_loss","–")}%</div>')
+    elif cs.get("n", 0) > 0:
+        parts.append(f'<div class="muted" style="font-size:11px;margin:4px 0">Realisert treffprosent '
+                     f'vises når minst 20 handler er lukket (nå: {cs["n"]}/20) — småutvalg gir falsk presisjon.</div>')
+
     # Nylige hendelser
     ev = rl.get("recent_events", [])
     if ev:

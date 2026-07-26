@@ -390,3 +390,88 @@ nedtrend, regime-skift). Ny «🧭 Start her»-guide viser arbeidsflyten steg fo
 Discord-varsler prioriterer nå nye kjøp-kandidater og nye Stage 4-nedtrender.
 
 **Ikke finansrådgivning.**
+
+## v13: Runde 6 — kutt-først-revisjon, ukedisiplin, posisjonsvarsler, CI-vern
+
+Sjette runde var en kritisk revisjon med ferske øyne. Hovedfunn: etter fem runder med
+bygging målte verktøyet samme relative momentum på seks nesten-kollineære måter.
+Denne versjonen KUTTER mer enn den legger til.
+
+**Kuttet/konsolidert.** Triage-visningen på Trend er fjernet (duplisert av I dag-
+kommandobåndet). RRG og sykliske par er fjernet (samme rotasjonsinformasjon som
+leaderboard + sektor-rotasjon, målt på fjerde og femte måte). Korrelasjonsmatrisen er
+demotert til en expander merket «for rebalansering — ikke et daglig signal».
+«Regelen vs deg»-paper-raden er fjernet fra UI (duplisert av live anbefalings-
+porteføljen; tilstandsfilen består). Backtest-siden er snudd: live sporing og
+anbefalings-backtest øverst, den mekaniske rotasjonsregelen demotert til referanse
+nederst (den slår ikke kjøp-og-hold risikojustert og skal ikke stå først).
+
+**Ukentlig-close-disiplin (Weinstein).** NSBC-signalene er ukentlige; daglig evaluering
+ga intra-uke-flimmer. Nå: kjøp-kandidater midtuke merkes «⏳ Foreløpig — bekreftes på
+fredagens close», og den live anbefalings-porteføljen endrer beholdning KUN på
+fredag/helg-bygg (midtuke revalueres bare). Mindre churn, tro mot metodikken.
+
+**Posisjonsspesifikke varsler (viktigste tilføyelse).** Diff/Discord varsler nå
+🚨-prioritert på DINE beholdninger: invalideringsnivå brutt (pris under roadmapens
+linje-i-sanden), posisjon nylig strukket (FOMO-sone), og posisjon inn i Stage 4-
+nedtrend. Kun på overganger — ingen daglig gjentakelse.
+
+**Metodikk-fikser.** Sjangerstyrke krympes bayesiansk mot nøytral for små sjangre
+(n/(n+4): 2-medlems crypto kan ikke lenger gi 0/100-ekstremer). Live-porteføljen har
+SPY- og gull-benchmark tegnet ved siden av (en kurve uten benchmark er ikke tolkbar).
+Makro-glossaret merker nå ledende (rentekurve, 12-18 mnd) vs samtidige (NFCI, spreader)
+motorer — komposittet blander horisonter, se hver motor.
+
+**CI-smoke-test (infrastruktur).** Nytt workflow-steg FØR bygget: compileall + import
+av alle moduler + sjekk at render-funksjonene og instrument-universet finnes. Dette
+fanger de avkuttede filene (som har veltet to bygg) før de når deploy. yfinance har
+allerede 3-forsøks retry.
+
+Utsatt med vilje (fra revisjonens gjerrig-liste): Stooq-fallback for yfinance, mobil
+kortvisning, posisjonsstørrelse på kandidat-kort, print-CSS, ukemodus-oppsummering.
+**Ikke finansrådgivning.**
+
+## v14: Runde 7 — pålitelighet, norsk kjøpbarhet, mobil, ukedigest
+
+Runde 7-revisjonen fant at live-siden var 5 uker gammel med tomt leaderboard —
+deployene nådde aldri ut (Actions-schedule dør etter 60 dager uten commits, og
+håndlim gir ingen commits). v14 angriper det strukturelt pluss norsk kjøpbarhet.
+
+**Pålitelighet (D1/D2/D4 + B1).** `deploy.ps1`: git-basert deploy — robocopy inn i
+klonen, commit, push; git nekter delvise filer OG holder Actions-timeren i live.
+`tests/test_build_synthetic.py` + `ci.yml`: syntetisk FULL-bygg-test på hver push
+(størrelsesgulv per side, versjonsstempel, leaderboard ≥ 60 rader — den siste hadde
+fanget juli-feilen). Cron er nå én oppføring med `timezone: 'Europe/Oslo'` (GitHub
+støtter IANA-tidssoner fra mars 2026) i stedet for sommer/vinter-paret. Ferskhets-
+vakt i footeren: er dataene > 3 dager gamle vises et oransje banner med diagnose.
+NOWA-sanity: verdier utenfor 0-8% forkastes (live-siden viste 6,00% mot 4,25%
+styringsrente — det forvrengte alle Sharpe-tall).
+
+**Norsk kjøpbarhet (C1).** Statisk kart i config: US-noterte ETF-er er PRIIPs-
+blokkert for norsk retail (siden okt 2024) og ikke ASK-kvalifiserte (EØS-krav).
+Kjøp-kandidatene viser nå chip: «🇳🇴 ASK ✓» (EXSA), «kjøpbar · ikke ASK» (BTC/ETH)
+eller «PRIIPs-blokkert → CSPX (IE00B5BMR087)» med verifisert UCITS-ekvivalent der
+en finnes (SPY, QQQ, SOXX, GDX, GDXJ, EEM, GLD). Uten kjent ekvivalent sies det.
+
+**Mobil + ukedigest (B3/B4).** Under 720px kollapser leaderboarden til kort-grid
+(symbol, kompositt, stage, score, 52u-avstand — trykk for Daily Report). 📅
+Ukesoppsummering på I dag: diff mot forrige fredags referanse-snapshot, oppdateres
+kun på fre/helg-bygg — ukens fasit, midtukens diff er støy.
+
+**Risiko-datapunkter (C3/C4).** Posisjoner med handlingsbehov viser avstand fra
+52u-topp; porteføljens drawdown-fra-topp vises fra faktisk NAV-kurve. Realisert
+treffprosent fra lukkede handler er koblet, men vises først ved n ≥ 20.
+
+**Stooq-fallback (D3).** Når yfinance feiler alle forsøk på en enkel US-ticker,
+hentes rå close fra Stooq (gratis CSV) så bygget ikke velter — flagges i loggen
+som ujustert gap-filler, yfinance forblir primærkilde.
+
+Verifisert i denne runden: B2 (nav) og B7 (lazy charts) var allerede riktig i
+v13-koden — live-avvikene var kun den gamle deployen. C5/C6 forblir gatet (Kelly
+ved n≥30-50, regime-splitt ved n≥40), C7/C8 avvist. **Ikke finansrådgivning.**
+
+### Deploy-sjekkliste (én gang)
+1. `git clone https://github.com/regg92s-hub/MarketAnalyzor.git C:\repos\MarketAnalyzor`
+2. Pakk ut zip → `.\deploy.ps1 -Source <utpakket mappe>`
+3. GitHub → Actions-fanen: **reaktiver workflowen** hvis den står som disabled
+4. Kjør workflowen manuelt én gang (Run workflow) og sjekk at alle sider stemples v14

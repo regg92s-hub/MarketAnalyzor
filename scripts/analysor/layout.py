@@ -79,6 +79,17 @@ table.lb td {{ white-space:nowrap; }}
 .grid {{ display:grid; gap:12px; }}
 .grid2 {{ grid-template-columns:1fr 1fr; }}
 @media(max-width:760px) {{ .grid2 {{ grid-template-columns:1fr; }} }}
+.lb-cards {{ display:none; }}
+@media(max-width:720px) {{
+  .lb-table-wrap {{ display:none; }}
+  .lb-cards {{ display:grid; grid-template-columns:1fr 1fr; gap:8px; }}
+  .lb-card {{ display:block; background:var(--panel2); border:1px solid var(--border);
+    border-radius:9px; padding:9px 11px; text-decoration:none; color:var(--text); }}
+  .lb-card-top {{ display:flex; justify-content:space-between; align-items:baseline; }}
+  .lb-card-sym {{ font-weight:700; font-size:14px; }}
+  .lb-card-comp {{ font-weight:700; font-size:17px; }}
+  .lb-card-sub {{ font-size:11px; color:var(--muted); margin-top:2px; }}
+}}
 .sector-grid {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:10px; }}
 .sc {{ background:var(--panel2); border:1px solid var(--border); border-radius:11px;
   padding:11px 13px; text-decoration:none; color:var(--text); display:block; }}
@@ -155,9 +166,26 @@ def lwc_script() -> str:
 
 
 def foot() -> str:
+    from datetime import datetime, timezone
+    gen_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     return f"""
 <footer>
   Generert {VERSION} · Data: yfinance/FRED · Metodikk: Northstar &amp; Badcharts / NFTRH ·
   <strong>Ikke finansrådgivning</strong> — ditt eget regelbaserte rammeverk.
 </footer>
+<script>
+/* B1: ferskhets-vakt — stille feil skal være synlige, ikke servert som ferske data */
+(function() {{
+  var gen = new Date("{gen_iso}");
+  var days = (Date.now() - gen.getTime()) / 86400000;
+  if (days > 3) {{
+    var b = document.createElement("div");
+    b.style.cssText = "position:sticky;bottom:0;left:0;right:0;background:#D55E00;color:#fff;" +
+      "padding:10px 16px;font-weight:700;font-size:14px;z-index:99;border-radius:8px;margin-top:12px";
+    b.textContent = "⚠ Dataene er " + Math.floor(days) + " dager gamle — det daglige bygget har " +
+      "sannsynligvis feilet. Sjekk GitHub Actions-fanen (schedule kan være deaktivert etter 60 dager uten commits).";
+    document.body.appendChild(b);
+  }}
+}})();
+</script>
 </div></body></html>"""

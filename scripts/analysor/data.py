@@ -60,6 +60,33 @@ def fetch_one(candidates: list, period: str = "max") -> tuple[pd.DataFrame | Non
                 if attempt == 2:
                     _log(f"  yf feil {sym}: {e}")
                 time.sleep(1.0)
+    # D3 (v14): Stooq-fallback — gratis CSV, ingen nøkkel. Kun enkle US-tickere
+    # (ikke ^indekser, -USD-kryptopar eller =F-futures). NB: Stooq gir RÅ close
+    # (ikke utbyttejustert) — godt nok som gap-filler så bygget ikke velter,
+    # men flagges i loggen. yfinance er fortsatt primærkilde.
+    for sym in candidates:
+        if any(ch in sym for ch in ("^", "=", "-")):
+            continue
+        try:
+            import requests as _rq
+            url = f"https://stooq.com/q/d/l/?s={sym.lower()}.us&i=d"
+            r = _rq.get(url, timeout=20)
+            if r.status_code == 200 and r.text.startswith("Date,"):
+                from io import StringIO
+                sdf = pd.read_csv(StringIO(r.text), parse_dates=["Date"], index_col="Date")
+                if len(sdf) > 30:
+                    out = pd.DataFrame(index=sdf.index)
+                    out["close_use"] = sdf["Close"]
+                    out["high"] = sdf.get("High", sdf["Close"])
+                    out["low"] = sdf.get("Low", sdf["Close"])
+                    out["open"] = sdf.get("Open", sdf["Close"])
+                    out["volume"] = sdf.get("Volume", np.nan)
+                    out = out.dropna(subset=["close_use"])
+                    out.index = pd.to_datetime(out.index).tz_localize(None)
+                    _log(f"  STOOQ-FALLBACK brukt for {sym} (rå close, ikke utbyttejustert)")
+                    return out, sym
+        except Exception as e:
+            _log(f"  stooq feil {sym}: {e}")
     return None, None
 
 

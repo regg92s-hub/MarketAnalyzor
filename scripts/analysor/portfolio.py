@@ -17,7 +17,7 @@ from .config import (PALETTE, CASH_THRESHOLD, MAX_POSITIONS, OVERBOUGHT_RSI,
 
 
 def render_portfolio(data) -> str:
-    P = layout.head("Portefølje", 2)
+    P = layout.head("Portefølje", 4)
     # Data porteføljen trenger: per-instrument score, sektor, pris, risiko, sjanger-medvind
     pdata = {
         "version": data.get("version"),

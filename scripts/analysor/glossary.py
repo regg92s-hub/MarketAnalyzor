@@ -31,11 +31,11 @@ def regime_one_liner(score: int | None) -> str:
 # Statiske forklaringer per metrikk-nøkkel (vises under boksen)
 EXPLAIN = {
     "regime_composite": {
-        "what": "Andel av makromotorene som er risk-on akkurat nå (0-100).",
+        "what": "Andel av makromotorene som er risk-on (0-100). NB: blander ledende (rentekurve, 12-18 mnd) og samtidige (NFCI, spreader) — se hver motor for horisont.",
         "do": "Over 66 = medvind for risiko. Under 34 = vurder gull/kontanter og lavere beta.",
     },
     "yield_curve": {
-        "what": "2-årig vs 10-årig statsrente. Invertert (negativ) har historisk gått forut for resesjon.",
+        "what": "2-årig vs 10-årig statsrente. LEDENDE 12-18 mnd — invertering har historisk gått forut for resesjon.",
         "do": "Bratt/positiv = sent i syklus-OK. Invertert = sen-syklus-varsel, men ikke timing-signal alene.",
     },
     "net_liquidity": {
@@ -55,11 +55,11 @@ EXPLAIN = {
         "do": "Stigende breakevens støtter realaktiva (gull, råvarer, energi).",
     },
     "nfci": {
-        "what": "Chicago Fed finansielle forhold. Negativ = løse forhold (lett kreditt), positiv = stramme.",
+        "what": "Chicago Fed finansielle forhold. SAMTIDIG indikator — negativ = løse forhold, positiv = stramme.",
         "do": "Negativ/løs = risk-on-medvind. Positiv/stram = forsiktighet.",
     },
     "credit_spread": {
-        "what": "High-yield kredittspread (OAS). Lav = risikovilje, høy/økende = stress i kreditt.",
+        "what": "High-yield kredittspread (OAS). SAMTIDIG/tidlig-varsel — lav = risikovilje, økende = kredittstress.",
         "do": "Utvidende spreader er et tidlig risk-off-varsel — ofte før aksjer snur.",
     },
     "panic": {
@@ -117,6 +117,10 @@ EXPLAIN = {
     "rvol": {
         "what": "Relativt volum: siste 4-ukers snittvolum vs 20-ukers snitt. Over 1,0 = volum over normalen.",
         "do": "Breakout uten volum (<1,0) feiler oftere — vent på bekreftelse før kjøp.",
+    },
+    "no_access": {
+        "what": "Norsk kjøpbarhet: US-noterte ETF-er er PRIIPs-blokkert for retail (siden okt 2024); ASK krever EØS-fond med ≥80% aksjer.",
+        "do": "Bruk UCITS-ekvivalenten der en er oppgitt. Eksisterende US-posisjoner kan holdes/selges, ikke økes.",
     },
     "from_52wh": {
         "what": "Avstand fra 52-ukers topp. Nærhet til toppen er et dokumentert momentum-signal (George-Hwang).",

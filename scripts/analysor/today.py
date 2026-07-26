@@ -13,13 +13,22 @@ Produserer:
 """
 from __future__ import annotations
 
+from . import config
+
 
 def _genre_lookup(genre_strength):
-    """sektor/sjanger -> {strength 0-100, state}. Strength = % av medlemmer som slår gull."""
+    """sektor/sjanger -> {strength 0-100, state}.
+
+    v13: Bayesiansk krymping mot nøytral (50) for små sjangre. En 2-medlems
+    sjanger (crypto) kan bare gi 0/50/100 — rå bruk gir småutvalgs-forvrengning.
+    Krympefaktor n/(n+4): 2 medl. -> 33% av avviket, 10 medl. -> 71%."""
     out = {}
     for g in genre_strength or []:
         s = g.get("strength")
-        out[g.get("genre")] = {"strength": s if s is not None else 50,
+        n = g.get("n") or 1
+        raw = s if s is not None else 50
+        shrunk = 50 + (raw - 50) * n / (n + 4)
+        out[g.get("genre")] = {"strength": round(shrunk, 1),
                                "state": g.get("state")}
     return out
 
@@ -75,6 +84,7 @@ def build_today(assets, genre_strength, regime, sector_summary,
             "breakout": a.get("breakout", False),
             "genre_state": gi["state"],
             "genre_strength": gstr,
+            "no_access": config.no_access(iid),
             "spark": [p[1] for p in (a.get("price_series") or [])[-30:]],
         })
     leaderboard.sort(key=lambda r: -r["composite"])
@@ -104,6 +114,12 @@ def build_today(assets, genre_strength, regime, sector_summary,
             r2 = dict(r); r2["why"] = ", ".join(why) or "konstruktivt oppsett"
             buys.append(r2)
     buys = buys[:8]
+    # v13 Weinstein-disiplin: NSBC-signalene er ukentlige. Midtuke er kandidatene
+    # FORELØPIGE — de bekreftes først på fredagens close. Flagges i UI og Discord.
+    import datetime as _dt
+    provisional = _dt.datetime.now().weekday() < 4
+    for b in buys:
+        b["provisional"] = provisional
 
     # Skaler av / unngå: stretched FOMO eller Stage 4 nedtrend
     avoids = []
