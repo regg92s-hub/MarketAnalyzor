@@ -475,3 +475,43 @@ ved n≥30-50, regime-splitt ved n≥40), C7/C8 avvist. **Ikke finansrådgivning
 2. Pakk ut zip → `.\deploy.ps1 -Source <utpakket mappe>`
 3. GitHub → Actions-fanen: **reaktiver workflowen** hvis den står som disabled
 4. Kjør workflowen manuelt én gang (Run workflow) og sjekk at alle sider stemples v14
+
+## v15: Posisjonering (COT), Gull→Miners-sekvens, USD basing-watch
+
+Basert på integrasjonsanalysen av AF Newsletter (Mergott) og Armstrongs
+«Understanding The World Economy». Ærlig destillat: to 45/86-siders dokumenter
+ga ÉN genuint ny akse pluss to små tillegg. Resten var bekreftelse av metodikk
+som allerede kjører, eller synspunkter/syklus-numerologi som holdes ute.
+
+**🎭 Posisjonering — COT Managed Money (rec 1, viktigst).** Systemets første
+sentiment-/posisjoneringsakse — ortogonal til alt annet (som er pris/momentum/
+makro-avledet). CFTC disaggregert futures-only via Socrata (gratis, ingen nøkkel):
+gull (088691) og sølv (084691), Managed Money-netto som % av åpen balanse,
+persentil mot rullerende 3 år. Vises som full tabell på Trend og som chip på
+I dag KUN ved ekstremer (>90. persentil = overfylt long/sårbar, <10. = utvasket).
+Ærlighet innebygd: fagfellevurdert litteratur (Sanders 2004/2009, Bosch &
+Pradkhan 2015) finner at posisjonering stort sett FØLGER pris — dette er
+kontekst/risiko, aldri timing, og endrer aldri beholdninger alene. Terskel fra
+analysen: hvis ekstrem-flaggene ikke viser sammenheng med forward hit-rate ved
+n ≥ 20, demoteres den til ren visning.
+
+**⛏️ Gull → Miners-sekvens (rec 2).** Mergotts disiplin formalisert som
+femtrinns tilstandskort på Trend: Ro → Korreksjon (kjøp GULL) → Kapitulasjon
+(vent) → Stabilisering → Bekreftelse (miners OK, via eksisterende NSBC
+lavrisiko-entry på GDX — IKKE nye indikatorer, 13/30 EMA avvist som kollineær
+med 12/36). Evidensen bak: GDX 26% totalavkastning 2006–2025 mot GLDs 373% —
+miners skuffer kronisk uten bekreftet vending. Rent visningskort, ikke
+kompositt-input.
+
+**💵 USD basing-watch (rec 3).** Strukturelt varsel FØR en dollar-rip: FRED
+DTWEXBGS, avstand fra månedlig 200-EMA + konsolideringsvarighet + avstand fra
+12-måneders bunn. Flermåneders base på/over 200-EMA gikk forut for 2014- og
+2022-rippene som knuste gull, råvarer og aksjer samtidig — noe 3M ROC ikke ser.
+Aktivt base-varsel teller som ett risk-off-tick i makro-komposittet og vises
+som eget regime-kort.
+
+Avvist (fra analysens punkt 5): 13/30 EMA, kalender-tidssymmetri på Roadmaps,
+offentlig/privat-kurv (duplisert av makro-komposittet), TIC-gjenoppliving,
+CNN/krypto-sentiment, og begge forfatternes retningssyn og syklusdatoer.
+Backlog: AAII-ekstremflagg (kun SPX-kontekst), GLD/TLT-tick.
+**Ikke finansrådgivning.**

@@ -303,6 +303,48 @@ def build_regime(api_key: str) -> dict:
         factors.append(1.0 if regime["nfci"]["value"] < 0 else 0.0)
     if "global_liquidity" in regime:
         factors.append(1.0 if regime["global_liquidity"]["chg_6m"] > 0 else 0.0)
+
+    # v15 (rec 3): USD basing-watch — strukturelt varsel FØR en dollar-rip.
+    # 2014 og 2022: flermåneders base på/over månedlig 200-EMA -> voldsom
+    # USD-styrking som knuste gull, råvarer OG aksjer samtidig. Momentum-mål
+    # (3M ROC) ser ikke oppsettet — dette gjør det. FRED DTWEXBGS (bred USD).
+    try:
+        usd = fetch_fred_series("DTWEXBGS", api_key)
+        if usd is not None and len(usd.dropna()) > 100:
+            usd = usd.dropna()
+            m = usd.resample("ME").last().dropna()
+            if len(m) >= 60:
+                span = min(200, len(m))
+                ema200m = m.ewm(span=span, adjust=False).mean()
+                dist = float(m.iloc[-1] / ema200m.iloc[-1] - 1) * 100
+                # konsolideringsvarighet: uker innenfor ±3%-bånd rundt 26u-snitt
+                w = usd.resample("W-FRI").last().dropna()
+                band = w.rolling(26).mean()
+                inband = (abs(w / band - 1) <= 0.03)
+                dur = 0
+                for v in reversed(inband.dropna().tolist()):
+                    if v:
+                        dur += 1
+                    else:
+                        break
+                near_low = float(usd.iloc[-1] / usd.tail(252).min() - 1) * 100
+                basing = (dist > -2) and (dur >= 12) and (near_low < 6)
+                regime["usd_watch"] = {
+                    "dist_200m_ema": round(dist, 1),
+                    "consol_weeks": dur,
+                    "above_12m_low_pct": round(near_low, 1),
+                    "basing": basing,
+                    "note": ("BASE-VARSEL: flermåneders konsolidering på/over månedlig "
+                             "200-EMA — historisk forløper for USD-styrking som rammer "
+                             "gull, råvarer og aksjer samtidig (2014, 2022)." if basing
+                             else "Ingen basing-struktur nå."),
+                }
+                # Eskalering (rec 3): bekreftet base bidrar som risk-off-tick
+                if basing:
+                    factors.append(0.0)
+    except Exception as e:
+        print(f"  usd_watch feilet: {e}")
+
     if factors:
         score = round(sum(factors) / len(factors) * 100)
         if score >= 66:

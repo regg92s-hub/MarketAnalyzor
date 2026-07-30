@@ -55,6 +55,30 @@ benchmarksmod.fetch_usdnok_monthly = lambda: pd.Series(
     10 + np.cumsum(np.random.randn(len(midx)) * 0.05), index=midx)
 benchmarksmod.fetch_nowa = lambda: 4.5
 
+# v15: COT-posisjonering — syntetisk (ingen nettverk i CI)
+from analysor import positioning as posmod
+
+
+def fake_cot():
+    rows = []
+    dates = pd.date_range(end=pd.Timestamp.today(), periods=200, freq="W-TUE")
+    for code in ("088691", "084691"):
+        base = 100000 if code == "088691" else 40000
+        for i, d in enumerate(dates):
+            long_ = base + int(20000 * np.sin(i / 15)) + np.random.randint(-2000, 2000)
+            short = base // 3 + np.random.randint(-1500, 1500)
+            rows.append({
+                "cftc_contract_market_code": code,
+                "report_date_as_yyyy_mm_dd": d.strftime("%Y-%m-%dT00:00:00.000"),
+                "m_money_positions_long_all": str(long_),
+                "m_money_positions_short_all": str(short),
+                "open_interest_all": str(base * 4),
+            })
+    return rows
+
+
+posmod.fetch_cot = fake_cot
+
 import build  # noqa: E402
 
 OUT = Path(os.environ.get("TEST_DOCS", "/tmp/analysor_ci"))

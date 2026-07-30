@@ -276,6 +276,10 @@ def main():
     flow = analytics.money_flow(raw)
     sec_flow = analytics.sector_flow(raw, assets_meta)
     cap_flows = analytics.capital_flows(raw)
+    # v15: COT-posisjonering (kontekst, ikke timing) + gull->miners-sekvens
+    from analysor import positioning as posmod
+    cot = posmod.build_positioning()
+    gm_seq = analytics.gold_miners_sequence(raw, assets)
     rot = analytics.rotation(raw, assets_meta)
     # v13: RRG fjernet fra UI — beregning droppet (nær-kollineær med leaderboard)
     corr = analytics.build_correlation(raw)
@@ -358,6 +362,8 @@ def main():
         "money_flow": flow,
         "sector_flow": sec_flow,
         "capital_flows": cap_flows,
+        "positioning": cot,
+        "gm_sequence": gm_seq,
         "rotation": rot,
         "correlation": corr,
         "backtest": bt,

@@ -118,6 +118,14 @@ EXPLAIN = {
         "what": "Relativt volum: siste 4-ukers snittvolum vs 20-ukers snitt. Over 1,0 = volum over normalen.",
         "do": "Breakout uten volum (<1,0) feiler oftere — vent på bekreftelse før kjøp.",
     },
+    "positioning": {
+        "what": "COT Managed Money-netto som persentil av 3 år. Første sentiment-akse i systemet — ortogonal til pris/momentum.",
+        "do": ">90. persentil = overfylt long (sårbar for unwind). <10. = utvasket. KONTEKST, ikke timing — posisjonering følger stort sett pris.",
+    },
+    "usd_watch": {
+        "what": "Strukturelt USD-varsel: flermåneders base på/over månedlig 200-EMA har historisk gått forut for dollar-ripper (2014, 2022).",
+        "do": "Aktivt base-varsel = forhøyet risiko for samtidig fall i gull, råvarer og aksjer. Teller som risk-off-tick i regimet.",
+    },
     "no_access": {
         "what": "Norsk kjøpbarhet: US-noterte ETF-er er PRIIPs-blokkert for retail (siden okt 2024); ASK krever EØS-fond med ≥80% aksjer.",
         "do": "Bruk UCITS-ekvivalenten der en er oppgitt. Eksisterende US-posisjoner kan holdes/selges, ikke økes.",

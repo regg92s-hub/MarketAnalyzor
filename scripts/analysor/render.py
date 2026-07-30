@@ -84,6 +84,17 @@ def render_today(data) -> str:
                    f'<span class="muted">Topp-destinasjoner: {dest_s}'
                    f'{" · " + " · ".join(extra) if extra else ""}</span></div></div>')
 
+    # v15: Posisjonering (COT) — vises kun ved ekstreme persentiler
+    pos = data.get("positioning") or {}
+    extremes = [c for c in pos.get("contracts", []) if c.get("state") != "Nøytral"]
+    if extremes:
+        bits = " · ".join(f'{html.escape(c["name"])}: <span style="color:{c["col"]};font-weight:700">'
+                          f'{html.escape(c["state"])}</span> ({c["percentile"]:.0f}. persentil)'
+                          for c in extremes)
+        out.append(f'<div style="background:var(--panel2);border-radius:8px;padding:10px 12px;margin-bottom:12px">'
+                   f'<div style="font-weight:700;margin-bottom:4px">🎭 Posisjonering (COT, kontekst — ikke timing)</div>'
+                   f'<div style="font-size:12.5px">{bits}</div></div>')
+
     # Hva er nytt siden forrige bygg (diff)
     changes = data.get("changes", [])
     if changes:
@@ -360,6 +371,24 @@ def render_trend(data) -> str:
                            ("fed_liquidity", "Fed-likviditet"), ("credit_spread", "Kredittspread"),
                            ("nfci", "NFCI (Chicago Fed)"), ("panic", "Momentum-regime"),
                            ("gpr", "Geopolitisk risiko (GPR)")]:
+            pass
+        # v15: USD basing-watch trenger label/col avledet her (egen struktur)
+        uw = reg.get("usd_watch")
+        if uw is not None:
+            reg["usd_watch"] = {
+                "label": ("⚠ BASE-VARSEL aktivt" if uw.get("basing")
+                          else f'Ingen base ({uw.get("consol_weeks",0)} uker konsolidert)'),
+                "col": (PALETTE["down"] if uw.get("basing") else PALETTE["neutral"]),
+                "note": uw.get("note", "") + f' Avstand mnd-200EMA: {uw.get("dist_200m_ema",0):+.1f}%.',
+            }
+        for key, title in [("yield_curve", "Yield-kurve 2s10s"), ("term_spread_10y3m", "10y-3m spread"),
+                           ("net_liquidity", "Net liquidity (WALCL−TGA−RRP)"),
+                           ("global_liquidity", "G3-likviditet (Fed+ECB+BoJ)"),
+                           ("real_rate", "Realrente 10y (TIPS)"), ("breakeven", "Inflasjonsforv. 10y"),
+                           ("fed_liquidity", "Fed-likviditet"), ("credit_spread", "Kredittspread"),
+                           ("nfci", "NFCI (Chicago Fed)"), ("panic", "Momentum-regime"),
+                           ("usd_watch", "USD basing-watch (DTWEXBGS)"),
+                           ("gpr", "Geopolitisk risiko (GPR)")]:
             r = reg.get(key)
             if r:
                 out.append(_regime_card(title, r.get("label"), r.get("col"), r.get("note", ""),
@@ -480,6 +509,41 @@ def render_trend(data) -> str:
             out.append('<div class="sector-grid" style="margin-top:8px">' + "".join(cards) + '</div>')
         out.append(glossary.box("capital_flows"))
         out.append('</section>')
+
+    # v15: Posisjonering (COT) — full tabell
+    pos = data.get("positioning") or {}
+    if pos.get("contracts"):
+        out.append('<section class="section"><h2>🎭 Posisjonering — COT Managed Money</h2>'
+                   f'<p class="sub">{html.escape(pos.get("note",""))}</p>'
+                   '<table><thead><tr><th>Kontrakt</th><th style="text-align:right">Netto % av OI</th>'
+                   '<th style="text-align:right">Persentil (3 år)</th><th style="text-align:right">Δ uke</th>'
+                   '<th>Tilstand</th><th>Per</th></tr></thead><tbody>')
+        for cc in pos["contracts"]:
+            out.append(f'<tr><td><strong>{html.escape(cc["name"])}</strong></td>'
+                       f'<td style="text-align:right">{cc["net_pct_oi"]:+.1f}%</td>'
+                       f'<td style="text-align:right;font-weight:600">{cc["percentile"]:.0f}</td>'
+                       f'<td style="text-align:right">{cc["velocity"]:+.1f}</td>'
+                       f'<td style="color:{cc["col"]};font-weight:600">{html.escape(cc["state"])}</td>'
+                       f'<td class="muted" style="font-size:11px">{html.escape(cc["asof"])}</td></tr>')
+        out.append('</tbody></table>' + glossary.box("positioning") + '</section>')
+
+    # v15: Gull -> Miners sekvenskort (visning, ikke kompositt-input)
+    gm = data.get("gm_sequence") or {}
+    if gm.get("steps"):
+        out.append('<section class="section"><h2>⛏️ Gull → Miners-sekvens</h2>'
+                   f'<p class="sub">{html.escape(gm.get("note",""))} '
+                   f'Gull: {gm.get("gld_dd52",0):+.1f}% fra 52u-topp, {gm.get("gld_r4w",0):+.1f}% siste 4 uker.</p>'
+                   '<div style="display:flex;flex-wrap:wrap;gap:6px;margin:8px 0">')
+        for i, s in enumerate(gm["steps"]):
+            active = (i == gm.get("state"))
+            bg = "var(--accent)" if active else "var(--panel2)"
+            fg = "#0b0d10" if active else "var(--muted)"
+            out.append(f'<span style="background:{bg};color:{fg};border-radius:14px;'
+                       f'padding:4px 12px;font-size:12px;font-weight:{700 if active else 400}">'
+                       f'{i}. {html.escape(s)}</span>')
+        out.append('</div>'
+                   f'<div style="font-weight:600;margin-top:4px">{html.escape(gm.get("label",""))}</div>'
+                   '</section>')
 
     # Kapitalrotasjon
     rot = data.get("rotation")

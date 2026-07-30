@@ -487,3 +487,56 @@ def panic_state(raw):
                  else "Ikke panikk-tilstand — full regelstyrt eksponering"),
         "panic": panic, "ret_12m": round(ret12 * 100, 1), "vol_6m": round(vol * 100, 1),
     }
+
+
+def gold_miners_sequence(raw, assets):
+    """
+    v15 (rec 2): Gull->Miners-sekvenskort — Mergotts disiplin formalisert med
+    KUN eksisterende NSBC-primitiver (ingen nye indikatorer, ingen 13/30 EMA).
+    Rene visnings-tilstander, IKKE kompositt-input: gull kjøpes på store fall,
+    miners kjøpes først ETTER bekreftelse (GDX-evidens: 26% totalavkastning
+    2006-2025 mot GLDs 373% — miners skuffer kronisk uten bekreftet vending).
+
+    Tilstander:
+      0 Ro: gull i trend, < 10% fra 52u-topp
+      1 Korreksjon: gull >= 10% under 52u-topp (kjøpssone for GULL, ikke miners)
+      2 Kapitulasjon: 4-ukers fall <= -8% (flush)
+      3 Stabilisering: bunn + høyere bunn siste ~4 uker
+      4 Bekreftelse: GDX kvalifiserer som NSBC lavrisiko-entry (eksisterende logikk)
+    """
+    gld = raw.get("GLD")
+    if gld is None:
+        return {}
+    c = gld["close_use"].dropna()
+    if len(c) < 300:
+        return {}
+    w = c.resample("W-FRI").last().dropna()
+    dd52 = (float(c.iloc[-1]) / float(c.tail(252).max()) - 1) * 100
+    r4w = (float(w.iloc[-1]) / float(w.iloc[-5]) - 1) * 100 if len(w) >= 5 else 0.0
+    lows4 = w.tail(4).min()
+    lows8 = w.tail(12).head(8).min() if len(w) >= 12 else lows4
+    higher_low = bool(lows4 > lows8)
+    gdx = assets.get("GDX", {}) or {}
+    gdx_confirmed = bool(
+        (gdx.get("northstar_score") or 0) >= 65
+        and not gdx.get("stretched")
+        and gdx.get("stage") in (1, 2)
+        and (gdx.get("breakout") or (gdx.get("st_state") == "Opp"))
+    )
+    if dd52 > -10:
+        state, label = 0, "Ro — gull i trend"
+    elif gdx_confirmed:
+        state, label = 4, "BEKREFTET — miners kvalifiserer (NSBC lavrisiko-entry på GDX)"
+    elif higher_low and r4w > -3:
+        state, label = 3, "Stabilisering — bunn + høyere bunn, vent på GDX-bekreftelse"
+    elif r4w <= -8:
+        state, label = 2, "Kapitulasjon — flush pågår, IKKE kjøp miners ennå"
+    else:
+        state, label = 1, "Korreksjon — kjøpssone for GULL, ikke miners"
+    steps = ["Ro", "Korreksjon (kjøp gull)", "Kapitulasjon (vent)",
+             "Stabilisering (følg med)", "Bekreftelse (miners OK)"]
+    return {"state": state, "label": label, "steps": steps,
+            "gld_dd52": round(dd52, 1), "gld_r4w": round(r4w, 1),
+            "gdx_confirmed": gdx_confirmed,
+            "note": ("Sekvensen: kjøp GULL på store fall; kjøp MINERS først etter "
+                     "bekreftet vending. Visningskort — endrer ikke kompositt.")}
