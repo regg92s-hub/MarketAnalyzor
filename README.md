@@ -515,3 +515,28 @@ offentlig/privat-kurv (duplisert av makro-komposittet), TIC-gjenoppliving,
 CNN/krypto-sentiment, og begge forfatternes retningssyn og syklusdatoer.
 Backlog: AAII-ekstremflagg (kun SPX-kontekst), GLD/TLT-tick.
 **Ikke finansrådgivning.**
+
+## v16: Trend-oversikt — bedre struktur og navigasjon
+
+Direkte respons på tilbakemelding om at Trend-fanen ble uoversiktlig etter fem
+runder med tillegg (ti makrokort, sju pengestrøm-par, to 51-rads tabeller,
+posisjonering, sekvenskort, korrelasjon, hit-rate — alt stablet rett etter
+hverandre uten navigasjon).
+
+**Hurtignav.** Sticky navigasjonsstripe rett under toppmenyen med hopp-lenker
+til hver seksjon (Regime, Bredde, Money flow, Sektorer, Kapitalstrøm,
+Posisjonering, Gull→Miners, Rotasjon, Leadership, Hit-rate). Kun seksjoner med
+faktisk data denne dagen vises som lenke.
+
+**Leadership-tabellene kuttet til topp 10.** De to 51-rads tabellene (vs Gull,
+vs Dollar) dominerte hele siden visuelt. Viser nå topp 10 med «Vis alle 51»
+bak en enkel utvid-knapp (ren HTML/CSS `<details>`, ingen JS).
+
+**Posisjonering og Gull→Miners-sekvens demotert til kollapsede paneler**, som
+korrelasjonsmatrisen fra v13 — dette er lavfrekvente kontekst-signaler (COT
+oppdateres ukentlig, sekvenstilstanden endrer seg sjelden), ikke daglige
+handlingspunkter. Tilstanden vises likevel i selve overskriften («Gull (COMEX):
+Nøytral · Sølv: Utvasket») så du ser hovedpoenget uten å klikke.
+
+Ryddet vekk en ubrukt kodesnutt (dødt for-loop fra v15-endringen).
+**Ikke finansrådgivning.**

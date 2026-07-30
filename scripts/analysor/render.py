@@ -318,6 +318,22 @@ def render_trend(data) -> str:
     # 🎯 DAGENS BESLUTNINGSBILDE — alt du trenger på én skjerm
     out.append(_decision_dashboard(data))
 
+    # v16: Hurtignav — hopp direkte til seksjon på en lang side. Bygges ut fra
+    # hvilke seksjoner som faktisk har data denne dagen (ingen døde lenker).
+    nav_items = [("#regime", "🎛️ Regime"), ("#bredde", "📐 Bredde"), ("#flow", "💧 Money flow"),
+                 ("#sektor", "🔀 Sektorer"), ("#kapital", "🌍 Kapitalstrøm"),
+                 ("#posisjonering", "🎭 Posisjonering"), ("#sekvens", "⛏️ Gull→Miners"),
+                 ("#rotasjon", "Rotasjon"), ("#leadership", "🏆 Leadership"),
+                 ("#hitrate", "📊 Hit-rate")]
+    out.append('<div style="position:sticky;top:48px;z-index:15;background:var(--bg);'
+               'padding:8px 0;margin-bottom:4px;border-bottom:1px solid var(--border);'
+               'display:flex;gap:6px;flex-wrap:wrap;overflow-x:auto">')
+    for href, label in nav_items:
+        out.append(f'<a href="{href}" style="font-size:11.5px;padding:4px 10px;'
+                   f'background:var(--panel2);border-radius:12px;color:var(--muted);'
+                   f'text-decoration:none;white-space:nowrap">{label}</a>')
+    out.append('</div>')
+
     # 🤖 AI-morgenbrief (valgfri, grunnet i signalene)
     brief = data.get("ai_brief")
     if brief and brief.get("text"):
@@ -344,7 +360,7 @@ def render_trend(data) -> str:
 
     # Regime-stripe
     reg = data.get("regime", {})
-    out.append('<section class="section"><h2>Makro-regime</h2>'
+    out.append('<section class="section" id="regime"><h2>Makro-regime</h2>'
                '<p class="sub">NFTRH-kontekst: renteregime, likviditet (net + global), realrente, '
                'kredittspreader, finansielle forhold og geopolitikk. '
                'Regime-score = andel risk-on-faktorer.</p>')
@@ -364,14 +380,6 @@ def render_trend(data) -> str:
                    "global_liquidity": "global_liquidity", "real_rate": "real_rate",
                    "breakeven": "breakeven", "nfci": "nfci", "credit_spread": "credit_spread",
                    "panic": "panic", "gpr": "gpr"}
-        for key, title in [("yield_curve", "Yield-kurve 2s10s"), ("term_spread_10y3m", "10y-3m spread"),
-                           ("net_liquidity", "Net liquidity (WALCL−TGA−RRP)"),
-                           ("global_liquidity", "G3-likviditet (Fed+ECB+BoJ)"),
-                           ("real_rate", "Realrente 10y (TIPS)"), ("breakeven", "Inflasjonsforv. 10y"),
-                           ("fed_liquidity", "Fed-likviditet"), ("credit_spread", "Kredittspread"),
-                           ("nfci", "NFCI (Chicago Fed)"), ("panic", "Momentum-regime"),
-                           ("gpr", "Geopolitisk risiko (GPR)")]:
-            pass
         # v15: USD basing-watch trenger label/col avledet her (egen struktur)
         uw = reg.get("usd_watch")
         if uw is not None:
@@ -404,7 +412,7 @@ def render_trend(data) -> str:
     br = data.get("breadth", {})
     gb = data.get("global_breadth", {})
     if br:
-        out.append('<section class="section"><h2>📐 Markedsbredde</h2>'
+        out.append('<section class="section" id="bredde"><h2>📐 Markedsbredde</h2>'
                    '<p class="sub">Andel av universet over 50- og 200-dagers MA (daglig). '
                    'Bred deltakelse bekrefter trend; smal bredde varsler svekkelse.</p>'
                    '<div class="sector-grid">')
@@ -435,7 +443,7 @@ def render_trend(data) -> str:
             verdict = (f'<div class="explain" style="margin-bottom:10px;border-left-color:{mf["col"]}">'
                        f'<span class="ex-what" style="color:{mf["col"]};font-weight:700">Pengestrøm: {html.escape(mf["state"])}</span> '
                        f'<span class="ex-do">{html.escape(mf.get("note",""))}</span></div>')
-        out.append('<section class="section"><h2>💧 Money flow &amp; likviditet</h2>'
+        out.append('<section class="section" id="flow"><h2>💧 Money flow &amp; likviditet</h2>'
                    '<p class="sub">Hvor strømmer kapitalen — risikovillig vs trygg havn. '
                    '3M/1M = ROC av forholdstallet; Over 50MA = ratio over 50-dagers snitt (daglig). '
                    'Risk-on krever begge positive.</p>'
@@ -458,7 +466,7 @@ def render_trend(data) -> str:
     sf = data.get("sector_flow", {})
     flows = sf.get("flows", []) if isinstance(sf, dict) else []
     if flows:
-        out.append('<section class="section"><h2>🔀 Sektor-rotasjon — hvor strømmer pengene</h2>'
+        out.append('<section class="section" id="sektor"><h2>🔀 Sektor-rotasjon — hvor strømmer pengene</h2>'
                    f'<p class="sub">Hver sektor målt på relativ momentum mot bredt marked '
                    f'({html.escape(sf.get("baseline","ACWI"))}), priced relativt. Innstrømning øverst, '
                    'utstrømning nederst. ⚡ = akselererende (1M leder 3M).</p>'
@@ -476,7 +484,7 @@ def render_trend(data) -> str:
     # 🌍 Kapitalstrøm (Armstrong-stil datapunkt)
     cf = data.get("capital_flows", {})
     if cf.get("destinations"):
-        out.append('<section class="section"><h2>🌍 Kapitalstrøm — hvor internasjonal kapital søker seg</h2>'
+        out.append('<section class="section" id="kapital"><h2>🌍 Kapitalstrøm — hvor internasjonal kapital søker seg</h2>'
                    '<p class="sub">Land/regioner rangert på relativ styrke <strong>målt i gull</strong> '
                    '(felles nøytral valuta) — proxy for hvor kapital strømmer. 3M/1M = ratio-ROC. '
                    '⚡ = akselererende (1M leder 3M). Pluss dollartrend og USA-konsentrasjon (SPY/ACWI). '
@@ -513,8 +521,11 @@ def render_trend(data) -> str:
     # v15: Posisjonering (COT) — full tabell
     pos = data.get("positioning") or {}
     if pos.get("contracts"):
-        out.append('<section class="section"><h2>🎭 Posisjonering — COT Managed Money</h2>'
-                   f'<p class="sub">{html.escape(pos.get("note",""))}</p>'
+        summary_bits = " · ".join(f'{c["name"]}: {c["state"]}' for c in pos["contracts"])
+        out.append(f'<details class="section" id="posisjonering" style="padding:10px 14px">'
+                   f'<summary style="cursor:pointer;font-weight:700">🎭 Posisjonering — COT Managed Money'
+                   f'<span class="muted" style="font-weight:400;font-size:12px"> — {html.escape(summary_bits)}</span></summary>'
+                   f'<p class="sub" style="margin-top:6px">{html.escape(pos.get("note",""))}</p>'
                    '<table><thead><tr><th>Kontrakt</th><th style="text-align:right">Netto % av OI</th>'
                    '<th style="text-align:right">Persentil (3 år)</th><th style="text-align:right">Δ uke</th>'
                    '<th>Tilstand</th><th>Per</th></tr></thead><tbody>')
@@ -525,13 +536,15 @@ def render_trend(data) -> str:
                        f'<td style="text-align:right">{cc["velocity"]:+.1f}</td>'
                        f'<td style="color:{cc["col"]};font-weight:600">{html.escape(cc["state"])}</td>'
                        f'<td class="muted" style="font-size:11px">{html.escape(cc["asof"])}</td></tr>')
-        out.append('</tbody></table>' + glossary.box("positioning") + '</section>')
+        out.append('</tbody></table>' + glossary.box("positioning") + '</details>')
 
     # v15: Gull -> Miners sekvenskort (visning, ikke kompositt-input)
     gm = data.get("gm_sequence") or {}
     if gm.get("steps"):
-        out.append('<section class="section"><h2>⛏️ Gull → Miners-sekvens</h2>'
-                   f'<p class="sub">{html.escape(gm.get("note",""))} '
+        out.append(f'<details class="section" id="sekvens" style="padding:10px 14px">'
+                   f'<summary style="cursor:pointer;font-weight:700">⛏️ Gull → Miners-sekvens'
+                   f'<span class="muted" style="font-weight:400;font-size:12px"> — {html.escape(gm.get("label",""))}</span></summary>'
+                   f'<p class="sub" style="margin-top:6px">{html.escape(gm.get("note",""))} '
                    f'Gull: {gm.get("gld_dd52",0):+.1f}% fra 52u-topp, {gm.get("gld_r4w",0):+.1f}% siste 4 uker.</p>'
                    '<div style="display:flex;flex-wrap:wrap;gap:6px;margin:8px 0">')
         for i, s in enumerate(gm["steps"]):
@@ -541,14 +554,12 @@ def render_trend(data) -> str:
             out.append(f'<span style="background:{bg};color:{fg};border-radius:14px;'
                        f'padding:4px 12px;font-size:12px;font-weight:{700 if active else 400}">'
                        f'{i}. {html.escape(s)}</span>')
-        out.append('</div>'
-                   f'<div style="font-weight:600;margin-top:4px">{html.escape(gm.get("label",""))}</div>'
-                   '</section>')
+        out.append('</div></details>')
 
     # Kapitalrotasjon
     rot = data.get("rotation")
     if rot:
-        out.append('<section class="section"><h2>Kapitalrotasjon — hovedinstrumenter vs gull</h2>'
+        out.append('<section class="section" id="rotasjon"><h2>Kapitalrotasjon — hovedinstrumenter vs gull</h2>'
                    f'<p class="sub">{html.escape(rot["note"])} '
                    'Slår gull = positiv ROC på 1M eller 3M. Klikk for ratioen i TradingView.</p>')
         out.append(f'<p style="font-size:15px;font-weight:700;color:{rot["col"]}">{html.escape(rot["label"])}</p>')
@@ -568,7 +579,7 @@ def render_trend(data) -> str:
         out.append('</div></section>')
 
     # Leadership ranking (vs gull + vs dollar)
-    out.append('<section class="section"><h2>🏆 Leadership ranking (relativ styrke)</h2>'
+    out.append('<section class="section" id="leadership"><h2>🏆 Leadership ranking (relativ styrke)</h2>'
                '<p class="sub">Sykliske instrumenter rangert etter vektet ROC mot gull og dollar. '
                '<strong>Leder %</strong> = hvor mye ratioen har steget (3M ROC) — altså hvor kraftig '
                'det slår, ikke bare at det slår.</p>'
@@ -599,13 +610,13 @@ def _hitrate_section(val) -> str:
     if not val or not val.get("available"):
         reason = (val or {}).get("reason", "bygger opp historikk")
         snaps = (val or {}).get("snapshots", 0)
-        return ('<section class="section"><h2>📊 Hit-rate-validering</h2>'
+        return ('<section class="section" id="hitrate"><h2>📊 Hit-rate-validering</h2>'
                 f'<p class="sub">Treffsikkerhet måles fra akkumulert score-historikk: '
                 f'«når score ≥ 70, hva ble fremtidig avkastning vs base-rate?» '
                 f'Status: {html.escape(reason)} ({snaps} snapshots). '
                 f'Statistikken blir meningsfull etter noen måneders daglige bygg.</p></section>')
 
-    parts = ['<section class="section"><h2>📊 Hit-rate-validering</h2>',
+    parts = ['<section class="section" id="hitrate"><h2>📊 Hit-rate-validering</h2>',
              f'<p class="sub">{html.escape(val.get("signal",""))} — fremtidig avkastning vs '
              f'<strong>base-rate</strong> (alle perioder). Edge = signal minus base. '
              f'{html.escape(val.get("note",""))} ({val.get("snapshots")} snapshots.)</p>',
@@ -753,40 +764,54 @@ def _regime_card(title, label, col, note, explain_key=None):
             f'<div class="sc-label muted">{html.escape(note or "")}</div>{ex}</div>')
 
 
+def _ranking_row(r, i, den, maxc):
+    tf = r.get("tf_over") or []
+    comp = r.get("composite")
+    beats = r.get("beats")
+    if beats and comp is not None:
+        barw = int(min(abs(comp) / maxc * 100, 100)) if maxc else 0
+        tfs = "+".join(tf) if tf else ""
+        strength = (f'<div style="font-size:12px;font-weight:700;color:{PALETTE["up"]}">'
+                    f'▲ +{comp:.1f}% <span class="muted" style="font-weight:400">{tfs}</span></div>'
+                    f'<div style="height:5px;background:#1a1f26;border-radius:3px;margin-top:2px">'
+                    f'<div style="height:5px;width:{barw}%;background:{PALETTE["up"]};border-radius:3px"></div></div>')
+    elif beats is False and comp is not None:
+        strength = f'<div style="font-size:12px;font-weight:700;color:{PALETTE["down"]}">▼ {comp:.1f}%</div>'
+    else:
+        strength = '<span class="muted">— n/a</span>'
+    return (f'<tr><td class="muted">{i}</td>'
+           f'<td><strong>{html.escape(r["label"])}/{den}</strong></td>'
+           f'<td class="muted">{html.escape(r.get("subclass",""))}</td>'
+           f'{_roc_cell(r.get("roc_1m"))}{_roc_cell(r.get("roc_3m"))}'
+           f'<td style="min-width:120px">{strength}</td>'
+           f'<td><a class="tv" href="{_tv(r["label"],den)}" target="_blank" rel="noopener">📊</a></td></tr>')
+
+
 def _ranking_table(rk, title, den):
+    """v16: viser topp 10 by default, resten bak «Vis alle N» — de to 51-rads
+    tabellene dominerte hele siden visuelt. Ren CSS/details, ingen JS nødvendig."""
     rows = rk.get("rows", [])
     if not rows:
         return f'<div><h3>{title}</h3><p class="muted">Ingen data.</p></div>'
-    # maks composite for skalering av styrke-bar
     comps = [abs(r.get("composite") or 0) for r in rows]
     maxc = max(comps) if comps else 1
-    out = [f'<div><h3>{title}</h3>',
-           '<table><thead><tr><th>#</th><th>Ratio</th><th>Sjanger</th>'
+    head = ('<table><thead><tr><th>#</th><th>Ratio</th><th>Sjanger</th>'
            '<th style="text-align:right">1M</th><th style="text-align:right">3M</th>'
-           '<th>Leder-styrke</th><th>TV</th></tr></thead><tbody>']
-    for i, r in enumerate(rows, 1):
-        tf = r.get("tf_over") or []
-        comp = r.get("composite")
-        beats = r.get("beats")
-        # Styrke-celle: ikon + tall + proporsjonal bar
-        if beats and comp is not None:
-            barw = int(min(abs(comp) / maxc * 100, 100)) if maxc else 0
-            tfs = "+".join(tf) if tf else ""
-            strength = (f'<div style="font-size:12px;font-weight:700;color:{PALETTE["up"]}">'
-                        f'▲ +{comp:.1f}% <span class="muted" style="font-weight:400">{tfs}</span></div>'
-                        f'<div style="height:5px;background:#1a1f26;border-radius:3px;margin-top:2px">'
-                        f'<div style="height:5px;width:{barw}%;background:{PALETTE["up"]};border-radius:3px"></div></div>')
-        elif beats is False and comp is not None:
-            strength = f'<div style="font-size:12px;font-weight:700;color:{PALETTE["down"]}">▼ {comp:.1f}%</div>'
-        else:
-            strength = '<span class="muted">— n/a</span>'
-        out.append(f'<tr><td class="muted">{i}</td>'
-                   f'<td><strong>{html.escape(r["label"])}/{den}</strong></td>'
-                   f'<td class="muted">{html.escape(r.get("subclass",""))}</td>'
-                   f'{_roc_cell(r.get("roc_1m"))}{_roc_cell(r.get("roc_3m"))}'
-                   f'<td style="min-width:120px">{strength}</td>'
-                   f'<td><a class="tv" href="{_tv(r["label"],den)}" target="_blank" rel="noopener">📊</a></td></tr>')
-    out.append('</tbody></table></div>')
+           '<th>Leder-styrke</th><th>TV</th></tr></thead><tbody>')
+    top = rows[:10]
+    rest = rows[10:]
+    out = [f'<div><h3>{title}</h3>', head]
+    for i, r in enumerate(top, 1):
+        out.append(_ranking_row(r, i, den, maxc))
+    out.append('</tbody></table>')
+    if rest:
+        out.append(f'<details><summary style="cursor:pointer;color:var(--accent);'
+                   f'font-size:12px;padding:6px 0">Vis alle {len(rows)} (+{len(rest)} til)</summary>')
+        out.append(head)
+        for i, r in enumerate(rest, 11):
+            out.append(_ranking_row(r, i, den, maxc))
+        out.append('</tbody></table></details>')
+    out.append('</div>')
     return "".join(out)
 
 
