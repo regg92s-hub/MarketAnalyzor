@@ -8,6 +8,9 @@ on:
 env:
   CHUNK_TOTAL: 8   # øk hvis universet vokser mye mer — 8 x ~100-150 tickere/jobb er trygt
 
+permissions:
+  contents: write
+
 jobs:
   fetch:
     runs-on: ubuntu-latest
