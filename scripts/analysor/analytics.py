@@ -8,7 +8,7 @@ import pandas as pd
 from . import indicators as ind
 from .config import (ROC_HORIZONS, BEATS_ROC_HORIZONS, CYCLICAL_IDS, CYCLICAL_PAIRS,
                      ROTATION_MAIN, GENRE_TAILWIND_PCT, GENRE_DOWNTREND_PCT,
-                     ASSET_SUBCLASS, BREADTH_MA)
+                     ASSET_SUBCLASS, BREADTH_MA, PALETTE)
 
 
 def build_ranking(raw, den_id, den_label, assets_meta):
@@ -137,6 +137,42 @@ def breadth(raw, universe_ids):
     return res
 
 
+def global_breadth(raw, ids):
+    """
+    Global bredde: % av land/sektor-ETF-er over 200-dagers MA (daglig).
+    Kjent regime-filter — bredt over 200d = risk-on, smalt = risk-off.
+    Returnerer også per-instrument-status for et heatmap.
+    """
+    over = total = 0
+    members = []
+    for iid in ids:
+        df = raw.get(iid)
+        if df is None or len(df) < 205:
+            continue
+        c = df["close_use"]
+        m200 = c.rolling(200).mean()
+        if pd.isna(m200.iloc[-1]):
+            continue
+        total += 1
+        is_over = bool(c.iloc[-1] > m200.iloc[-1])
+        if is_over:
+            over += 1
+        dist = round(float((c.iloc[-1] / m200.iloc[-1] - 1) * 100), 1)
+        members.append({"id": iid, "over": is_over, "dist": dist})
+    pct = round(over / total * 100) if total else None
+    members.sort(key=lambda x: -x["dist"])
+    if pct is None:
+        state, col = "Ingen data", PALETTE["neutral"]
+    elif pct >= 60:
+        state, col = "Bred risk-on", PALETTE["up"]
+    elif pct >= 40:
+        state, col = "Blandet", PALETTE["warn"]
+    else:
+        state, col = "Smal / risk-off", PALETTE["down"]
+    return {"pct_over_200d": pct, "n": total, "over": over,
+            "state": state, "col": col, "members": members}
+
+
 def cyclical_pairs(raw):
     out = []
     for a_id, b_id, label in CYCLICAL_PAIRS:
@@ -154,13 +190,22 @@ def cyclical_pairs(raw):
 
 
 def money_flow(raw):
-    """Risk-appetitt-signaler med ROC (3M) + 50-dagers MA-status."""
+    """
+    Risk-appetitt / pengestrøm-signaler: ratio-ROC (3M) + 50d MA-status.
+    Hvert par fanger HVOR kapital strømmer (risikovillig vs trygg havn).
+    """
+    from .config import PALETTE
     defs = [
-        ("HYG", "TLT", "Kreditt-appetitt (HYG/TLT)", "Høy = risikovillig kapital søker yield"),
+        ("HYG", "TLT", "Kreditt-appetitt (HYG/TLT)", "Høy = risikovillig kapital søker yield i kreditt"),
         ("COPX", "GLD", "Vekst vs frykt (kobber/gull)", "Høy = vekstforventning over sikkerhet"),
         ("EEM", "ACWI", "EM-ledelse (EM/verden)", "Høy = risk-on, likviditet til periferien"),
+        ("XLY", "XLP", "Syklisk vs defensiv (XLY/XLP)", "Høy = forbrukere risk-on, lav = flukt til defensivt"),
+        ("IWM", "SPY", "Småselskaper vs store (IWM/SPY)", "Høy = bred risikovilje, lav = flukt til kvalitet"),
+        ("LQD", "IEF", "Kreditt vs stat (LQD/IEF)", "Høy = jakt på yield, lav = trygghet i statspapir"),
+        ("SOXX", "SPY", "Halvledere-ledelse (SOXX/SPY)", "Høy = offensiv tech-risiko leder markedet"),
     ]
     out = []
+    risk_on_n = risk_off_n = 0
     for n_id, d_id, label, note in defs:
         n, d = raw.get(n_id), raw.get(d_id)
         if n is None or d is None:
@@ -170,18 +215,187 @@ def money_flow(raw):
             continue
         ratio = comb["n"] / comb["d"]
         r3 = ind.roc(ratio, 63)
+        r1 = ind.roc(ratio, 21)
         ma50 = ratio.rolling(50).mean()
         over = bool(ratio.iloc[-1] > ma50.iloc[-1]) if pd.notna(ma50.iloc[-1]) else None
         risk_on = (r3 or 0) > 0 and bool(over)
-        from .config import PALETTE
+        if risk_on:
+            risk_on_n += 1
+        elif (r3 or 0) <= -2:
+            risk_off_n += 1
         out.append({
             "label": label, "roc_3m": round(r3, 1) if r3 is not None else None,
+            "roc_1m": round(r1, 1) if r1 is not None else None,
             "over_50ma": over,
             "state": "Risk-on" if risk_on else ("Nøytral" if (r3 or 0) > -2 else "Risk-off"),
             "col": PALETTE["up"] if risk_on else (PALETTE["warn"] if (r3 or 0) > -2 else PALETTE["down"]),
             "note": note,
         })
-    return out
+    # Samlet pengestrøm-verdikt
+    tot = risk_on_n + risk_off_n
+    n_all = len(out)
+    if n_all:
+        if risk_on_n >= n_all * 0.5:
+            flow_state, flow_col = "Risk-on", PALETTE["up"]
+            flow_note = f"{risk_on_n}/{n_all} strømmer mot risiko — kapital søker avkastning."
+        elif risk_off_n >= n_all * 0.5:
+            flow_state, flow_col = "Risk-off", PALETTE["down"]
+            flow_note = f"{risk_off_n}/{n_all} strømmer mot trygghet — kapital flykter til defensivt/gull."
+        else:
+            flow_state, flow_col = "Blandet", PALETTE["warn"]
+            flow_note = f"Pengestrøm spriker ({risk_on_n} risk-on, {risk_off_n} risk-off) — ingen klar retning."
+    else:
+        flow_state, flow_col, flow_note = "Ingen data", PALETTE["neutral"], ""
+    return {"pairs": out, "state": flow_state, "col": flow_col, "note": flow_note,
+            "risk_on_n": risk_on_n, "risk_off_n": risk_off_n, "n": n_all}
+
+
+def sector_flow(raw, assets_meta):
+    """
+    HVOR strømmer pengene på sektor-/sjanger-nivå: hver sektor måles på
+    relativ momentum (1M & 3M ratio-ROC) mot bredt marked (ACWI), priced in gold.
+    Rangerer innstrømning (positiv) vs utstrømning (negativ) — rotasjonsbildet.
+    """
+    from .config import PALETTE, INSTRUMENT_GROUPS
+    bench = raw.get("ACWI")
+    if bench is None:
+        bench = raw.get("SPY")
+    if bench is None:
+        return {"flows": []}
+    flows = []
+    for g in INSTRUMENT_GROUPS:
+        sec = g.get("sector")
+        iids = [i["id"] for i in g["instruments"] if raw.get(i["id"]) is not None]
+        if not iids:
+            continue
+        # Sektorindeks = likevektet snitt av medlemmenes ratio mot bench
+        r1s, r3s = [], []
+        for iid in iids:
+            df = raw.get(iid)
+            comb = pd.DataFrame({"n": df["close_use"], "d": bench["close_use"]}).dropna()
+            if len(comb) < 70:
+                continue
+            ratio = comb["n"] / comb["d"]
+            r1 = ind.roc(ratio, 21)
+            r3 = ind.roc(ratio, 63)
+            if r1 is not None:
+                r1s.append(r1)
+            if r3 is not None:
+                r3s.append(r3)
+        if not r3s:
+            continue
+        import numpy as _np
+        avg1 = float(_np.mean(r1s)) if r1s else None
+        avg3 = float(_np.mean(r3s)) if r3s else None
+        # Akselerasjon: strømmer pengene inn raskere (1M > 3M-snitt)?
+        accel = (avg1 is not None and avg3 is not None and avg1 > avg3 / 3)
+        flows.append({
+            "sector": sec, "display": "Råvarer" if sec == "Rawarer" else sec,
+            "roc_1m": round(avg1, 1) if avg1 is not None else None,
+            "roc_3m": round(avg3, 1) if avg3 is not None else None,
+            "accel": accel, "n": len(iids),
+        })
+    flows.sort(key=lambda x: (x["roc_3m"] if x["roc_3m"] is not None else -999), reverse=True)
+    # Marker inn-/utstrømning
+    for f in flows:
+        r3 = f["roc_3m"] or 0
+        if r3 > 1:
+            f["dir"], f["col"] = "Innstrømning", PALETTE["up"]
+        elif r3 < -1:
+            f["dir"], f["col"] = "Utstrømning", PALETTE["down"]
+        else:
+            f["dir"], f["col"] = "Nøytral", PALETTE["warn"]
+    return {"flows": flows, "baseline": ("ACWI" if raw.get("ACWI") is not None else "SPY")}
+
+
+def capital_flows(raw):
+    """
+    Kapitalstrøm (Armstrong-inspirert, kun som DATAPUNKT): hvor internasjonal
+    kapital søker seg — mellom land/regioner, inn/ut av dollar, og konsentrasjon
+    i USA vs resten av verden. Frie proxier: relativ styrke i lands-ETF-er målt
+    i GULL (felles nøytral valuta), dollartrend (UUP), og SPY/ACWI-forhold.
+    Evidensbasert del av rammeverket (kapitalflukt, flight-to-quality) — ikke
+    sykluspåstander.
+    """
+    from .config import PALETTE
+    gld = raw.get("GLD")
+    if gld is None:
+        return {}
+    regions = [("USA", "SPY"), ("Europa", "EXSA"), ("Japan", "EWJ"),
+               ("Storbritannia", "EWU"), ("Kina", "FXI"), ("India", "INDA"),
+               ("Brasil", "EWZ"), ("EM samlet", "EEM"), ("Canada", "EWC"),
+               ("Australia", "EWA")]
+    dest = []
+    for name, iid in regions:
+        df = raw.get(iid)
+        if df is None:
+            continue
+        comb = pd.DataFrame({"n": df["close_use"], "d": gld["close_use"]}).dropna()
+        if len(comb) < 70:
+            continue
+        ratio = comb["n"] / comb["d"]
+        r3 = ind.roc(ratio, 63)
+        r1 = ind.roc(ratio, 21)
+        if r3 is None:
+            continue
+        dest.append({"region": name, "roc_3m": round(r3, 1),
+                     "roc_1m": round(r1, 1) if r1 is not None else None,
+                     "accel": (r1 is not None and r1 > r3 / 3)})
+    dest.sort(key=lambda x: -x["roc_3m"])
+
+    # Dollartrend: søker kapital seg til eller fra USD?
+    dollar = {}
+    uup = raw.get("UUP")
+    if uup is not None and len(uup) > 70:
+        c = uup["close_use"].dropna()
+        r3 = ind.roc(c, 63)
+        ma50 = c.rolling(50).mean()
+        over = bool(c.iloc[-1] > ma50.iloc[-1]) if pd.notna(ma50.iloc[-1]) else None
+        if (r3 or 0) > 0 and over:
+            dollar = {"state": "Kapital søker USD", "col": PALETTE["up"], "roc_3m": round(r3, 1)}
+        elif (r3 or 0) < -1:
+            dollar = {"state": "Kapital forlater USD", "col": PALETTE["down"], "roc_3m": round(r3, 1)}
+        else:
+            dollar = {"state": "USD nøytral", "col": PALETTE["warn"],
+                      "roc_3m": round(r3, 1) if r3 is not None else None}
+
+    # USA-konsentrasjon: SPY/ACWI — strømmer kapital inn i USA eller ut i verden?
+    us_conc = {}
+    spy, acwi = raw.get("SPY"), raw.get("ACWI")
+    if spy is not None and acwi is not None:
+        comb = pd.DataFrame({"n": spy["close_use"], "d": acwi["close_use"]}).dropna()
+        if len(comb) > 70:
+            r3 = ind.roc(comb["n"] / comb["d"], 63)
+            if r3 is not None:
+                if r3 > 0.5:
+                    us_conc = {"state": "Konsentreres i USA", "col": PALETTE["up"], "roc_3m": round(r3, 1)}
+                elif r3 < -0.5:
+                    us_conc = {"state": "Diversifiseres ut av USA", "col": PALETTE["warn"], "roc_3m": round(r3, 1)}
+                else:
+                    us_conc = {"state": "Balansert USA/verden", "col": PALETTE["neutral"], "roc_3m": round(r3, 1)}
+
+    # Flight-to-quality: gull + USD + statsobligasjoner stiger samtidig = krisestrøm
+    ftq = False
+    tlt = raw.get("TLT")
+    if uup is not None and tlt is not None:
+        g3 = ind.roc(gld["close_use"].dropna(), 63) or 0
+        u3 = ind.roc(uup["close_use"].dropna(), 63) or 0
+        t3 = ind.roc(tlt["close_use"].dropna(), 63) or 0
+        ftq = g3 > 2 and u3 > 0 and t3 > 0
+
+    top = dest[0]["region"] if dest else None
+    if ftq:
+        verdict = "⚠ Flight-to-quality: gull, USD og statsobligasjoner stiger samtidig — kapital søker trygghet."
+        col = PALETTE["down"]
+    elif top:
+        d2 = f", {dest[1]['region']}" if len(dest) > 1 else ""
+        verdict = f"Kapital søker seg mot {top}{d2} (målt i gull). {dollar.get('state','')}"
+        col = PALETTE["up"] if dest[0]["roc_3m"] > 0 else PALETTE["warn"]
+    else:
+        verdict, col = "Utilstrekkelig data for kapitalstrøm.", PALETTE["neutral"]
+
+    return {"destinations": dest, "dollar": dollar, "us_concentration": us_conc,
+            "flight_to_quality": ftq, "verdict": verdict, "col": col}
 
 
 def rotation(raw, assets_meta):
@@ -213,3 +427,116 @@ def rotation(raw, assets_meta):
         col, note = PALETTE["up"], "Flertallet slår gull – risk-on holder følge."
     return {"label": f"{len(beats)}/{tot} slår gull (ROC 1M eller 3M)",
             "col": col, "note": note, "beats": beats, "loses": loses}
+
+
+def build_rrg(raw, assets_meta):
+    """RRG-punkter (RS-Ratio/RS-Momentum) for RRG_SET vs gull."""
+    from .config import RRG_SET
+    gld = raw.get("GLD")
+    if gld is None:
+        return {"baseline": "GLD", "points": []}
+    points = []
+    for iid in RRG_SET:
+        num = raw.get(iid)
+        if num is None:
+            continue
+        pt = ind.rrg_point(num["close_use"], gld["close_use"])
+        if pt is None:
+            continue
+        pt["id"] = iid
+        pt["label"] = assets_meta.get(iid, {}).get("symbol_label", iid)
+        points.append(pt)
+    return {"baseline": "GLD", "points": points}
+
+
+def build_correlation(raw):
+    """Korrelasjonsmatrise for det kuraterte settet."""
+    from .config import CORR_SET
+    closes = {iid: raw[iid]["close_use"] for iid in CORR_SET if iid in raw}
+    return ind.correlation_matrix(closes)
+
+
+def panic_state(raw):
+    """
+    Panikk-regime (Daniel & Moskowitz 2016): momentum krasjer i rebound etter
+    bear-marked med høy volatilitet. Flagg = SPY 12M-avkastning < 0 OG
+    realisert 6M-vol > terskel. Når flagget er på, dempes rotasjons-
+    aggressivitet (eksponering caps).
+    """
+    from .config import (PANIC_RET_LOOKBACK_M, PANIC_VOL_LOOKBACK_M,
+                         PANIC_VOL_THRESHOLD, PALETTE)
+    spy = raw.get("SPY")
+    if spy is None:
+        return None
+    c = spy["close_use"].dropna()
+    m = c.resample("ME").last().dropna()
+    if len(m) < PANIC_RET_LOOKBACK_M + 2:
+        return None
+    ret12 = float(m.iloc[-1] / m.iloc[-1 - PANIC_RET_LOOKBACK_M] - 1)
+    daily = c.pct_change().dropna().tail(PANIC_VOL_LOOKBACK_M * 21)
+    if len(daily) < 40:
+        return None
+    vol = float(daily.std() * (252 ** 0.5))
+    panic = (ret12 < 0) and (vol > PANIC_VOL_THRESHOLD)
+    return {
+        "label": (f"PANIKK-REGIME (SPY 12m {ret12*100:+.0f}%, vol {vol*100:.0f}%)" if panic
+                  else f"Normalt (SPY 12m {ret12*100:+.0f}%, vol {vol*100:.0f}%)"),
+        "col": PALETTE["down"] if panic else PALETTE["up"],
+        "note": ("Bear + høy vol: momentum-krasj-fare — eksponering dempes til 50% "
+                 "(Daniel & Moskowitz 2016)" if panic
+                 else "Ikke panikk-tilstand — full regelstyrt eksponering"),
+        "panic": panic, "ret_12m": round(ret12 * 100, 1), "vol_6m": round(vol * 100, 1),
+    }
+
+
+def gold_miners_sequence(raw, assets):
+    """
+    v15 (rec 2): Gull->Miners-sekvenskort — Mergotts disiplin formalisert med
+    KUN eksisterende NSBC-primitiver (ingen nye indikatorer, ingen 13/30 EMA).
+    Rene visnings-tilstander, IKKE kompositt-input: gull kjøpes på store fall,
+    miners kjøpes først ETTER bekreftelse (GDX-evidens: 26% totalavkastning
+    2006-2025 mot GLDs 373% — miners skuffer kronisk uten bekreftet vending).
+
+    Tilstander:
+      0 Ro: gull i trend, < 10% fra 52u-topp
+      1 Korreksjon: gull >= 10% under 52u-topp (kjøpssone for GULL, ikke miners)
+      2 Kapitulasjon: 4-ukers fall <= -8% (flush)
+      3 Stabilisering: bunn + høyere bunn siste ~4 uker
+      4 Bekreftelse: GDX kvalifiserer som NSBC lavrisiko-entry (eksisterende logikk)
+    """
+    gld = raw.get("GLD")
+    if gld is None:
+        return {}
+    c = gld["close_use"].dropna()
+    if len(c) < 300:
+        return {}
+    w = c.resample("W-FRI").last().dropna()
+    dd52 = (float(c.iloc[-1]) / float(c.tail(252).max()) - 1) * 100
+    r4w = (float(w.iloc[-1]) / float(w.iloc[-5]) - 1) * 100 if len(w) >= 5 else 0.0
+    lows4 = w.tail(4).min()
+    lows8 = w.tail(12).head(8).min() if len(w) >= 12 else lows4
+    higher_low = bool(lows4 > lows8)
+    gdx = assets.get("GDX", {}) or {}
+    gdx_confirmed = bool(
+        (gdx.get("northstar_score") or 0) >= 65
+        and not gdx.get("stretched")
+        and gdx.get("stage") in (1, 2)
+        and (gdx.get("breakout") or (gdx.get("st_state") == "Opp"))
+    )
+    if dd52 > -10:
+        state, label = 0, "Ro — gull i trend"
+    elif gdx_confirmed:
+        state, label = 4, "BEKREFTET — miners kvalifiserer (NSBC lavrisiko-entry på GDX)"
+    elif higher_low and r4w > -3:
+        state, label = 3, "Stabilisering — bunn + høyere bunn, vent på GDX-bekreftelse"
+    elif r4w <= -8:
+        state, label = 2, "Kapitulasjon — flush pågår, IKKE kjøp miners ennå"
+    else:
+        state, label = 1, "Korreksjon — kjøpssone for GULL, ikke miners"
+    steps = ["Ro", "Korreksjon (kjøp gull)", "Kapitulasjon (vent)",
+             "Stabilisering (følg med)", "Bekreftelse (miners OK)"]
+    return {"state": state, "label": label, "steps": steps,
+            "gld_dd52": round(dd52, 1), "gld_r4w": round(r4w, 1),
+            "gdx_confirmed": gdx_confirmed,
+            "note": ("Sekvensen: kjøp GULL på store fall; kjøp MINERS først etter "
+                     "bekreftet vending. Visningskort — endrer ikke kompositt.")}

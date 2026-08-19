@@ -1,0 +1,73 @@
+name: Aksje-screener (ukentlig)
+on:
+  schedule:
+    - cron: '0 20 * * 0'   # søndag kveld, tidssone Europe/Oslo
+      timezone: 'Europe/Oslo'
+  workflow_dispatch: {}
+
+env:
+  CHUNK_TOTAL: 8   # øk hvis universet vokser mye mer — 8 x ~100-150 tickere/jobb er trygt
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      matrix:
+        chunk_index: [0, 1, 2, 3, 4, 5, 6, 7]
+      fail-fast: false   # én chunk som feiler skal ikke stoppe de andre
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install deps
+        run: pip install pandas numpy requests yfinance lxml html5lib
+
+      - name: Smoke-test (fanger avkuttede filer)
+        run: python -m compileall -q scripts
+
+      - name: Hent chunk ${{ matrix.chunk_index }}
+        run: python scripts/build_screener.py fetch-chunk --index ${{ matrix.chunk_index }} --total ${{ env.CHUNK_TOTAL }}
+
+      - name: Last opp chunk-resultat
+        uses: actions/upload-artifact@v4
+        with:
+          name: screener-chunk-${{ matrix.chunk_index }}
+          path: docs/_screener_chunk_${{ matrix.chunk_index }}.json
+          if-no-files-found: warn
+
+  merge:
+    needs: fetch
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install deps
+        run: pip install pandas numpy requests
+
+      - name: Last ned alle chunk-resultater
+        uses: actions/download-artifact@v4
+        with:
+          pattern: screener-chunk-*
+          path: docs/
+          merge-multiple: true
+
+      - name: Slå sammen, rangér, varsle, publiser
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: python scripts/build_screener.py merge --total ${{ env.CHUNK_TOTAL }}
+
+      - name: Deploy screener.html/json til gh-pages
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./docs
+          publish_branch: gh-pages
+          keep_files: true
+          user_name: github-actions[bot]
+          user_email: 41898282+github-actions[bot]@users.noreply.github.com

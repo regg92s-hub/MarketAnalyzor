@@ -1,4 +1,7 @@
 """market-analysor: gull-relativt, regime-basert markeds-dashboard."""
-from .config import VERSION
+try:
+    from .config import VERSION
+except Exception:  # robust: en delvis config skal ikke velte hele pakken
+    VERSION = "unknown"
 
 __all__ = ["VERSION"]
