@@ -29,12 +29,9 @@ CSP = (
 
 NAV = """
 <nav class="nav">
-  <a href="index.html" class="{a0}">🎯 I dag</a>
-  <a href="trend.html" class="{a1}">📈 Trend-oversikt</a>
-  <a href="report.html" class="{a2}">📊 Daily Report</a>
-  <a href="roadmap.html" class="{a3}">🗺️ Roadmaps</a>
-  <a href="portfolio.html" class="{a4}">💼 Portefølje</a>
-  <a href="backtest.html" class="{a5}">🧪 Backtest</a>
+  <a href="index.html" class="{a0}">📈 Trend-oversikt</a>
+  <a href="report.html" class="{a1}">📊 Market Daily Report</a>
+  <a href="portfolio.html" class="{a2}">💼 Portefølje</a>
 </nav>
 """
 
@@ -61,35 +58,11 @@ h1 {{ font-size:22px; margin:6px 0 2px; }}
 h2 {{ font-size:17px; margin:22px 0 6px; }}
 h3 {{ font-size:14px; margin:0; }}
 .sub {{ color:var(--muted); font-size:12px; margin:0 0 10px; }}
-.explain {{ font-size:11.5px; line-height:1.5; margin:5px 0 2px; padding:6px 9px;
-  background:var(--panel2); border-left:2px solid var(--accent); border-radius:4px; }}
-.explain .ex-what {{ color:var(--text); }}
-.explain .ex-do {{ color:var(--muted); }}
-.today-cols {{ display:grid; grid-template-columns:repeat(3,1fr); gap:14px; }}
-@media (max-width:760px) {{ .today-cols {{ grid-template-columns:1fr; }} }}
-.today-col {{ background:var(--panel2); border-radius:8px; padding:10px 12px; }}
-.today-item {{ padding:5px 0; border-bottom:1px solid var(--border); }}
-.today-item:last-child {{ border-bottom:none; }}
-table.lb {{ font-size:13px; }}
-table.lb th {{ position:sticky; top:0; background:var(--panel); white-space:nowrap; }}
-table.lb td {{ white-space:nowrap; }}
-.sort-ar {{ color:var(--accent); font-size:10px; }}
 .section {{ background:var(--panel); border:1px solid var(--border); border-radius:14px;
   padding:16px; margin:14px 0; }}
 .grid {{ display:grid; gap:12px; }}
 .grid2 {{ grid-template-columns:1fr 1fr; }}
 @media(max-width:760px) {{ .grid2 {{ grid-template-columns:1fr; }} }}
-.lb-cards {{ display:none; }}
-@media(max-width:720px) {{
-  .lb-table-wrap {{ display:none; }}
-  .lb-cards {{ display:grid; grid-template-columns:1fr 1fr; gap:8px; }}
-  .lb-card {{ display:block; background:var(--panel2); border:1px solid var(--border);
-    border-radius:9px; padding:9px 11px; text-decoration:none; color:var(--text); }}
-  .lb-card-top {{ display:flex; justify-content:space-between; align-items:baseline; }}
-  .lb-card-sym {{ font-weight:700; font-size:14px; }}
-  .lb-card-comp {{ font-weight:700; font-size:17px; }}
-  .lb-card-sub {{ font-size:11px; color:var(--muted); margin-top:2px; }}
-}}
 .sector-grid {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:10px; }}
 .sc {{ background:var(--panel2); border:1px solid var(--border); border-radius:11px;
   padding:11px 13px; text-decoration:none; color:var(--text); display:block; }}
@@ -106,12 +79,6 @@ tr:last-child td {{ border-bottom:none; }}
 .up {{ color:var(--up); }} .down {{ color:var(--down); }} .warn {{ color:var(--warn); }}
 .tag {{ display:inline-block; padding:1px 6px; border-radius:6px; font-size:10px; font-weight:600;
   background:var(--panel2); border:1px solid var(--border); }}
-.chip {{ display:inline-flex; align-items:center; gap:5px; padding:4px 10px; margin:2px;
-  border-radius:8px; font-size:13px; font-weight:700; text-decoration:none;
-  background:var(--panel2); border:1px solid var(--accent); color:var(--accent); }}
-.chip:hover {{ background:var(--accent); color:#06121f; }}
-.chip-tf {{ font-size:10px; font-weight:600; opacity:0.8; padding:1px 5px; border-radius:5px;
-  background:rgba(86,180,233,0.18); }}
 .lwc {{ width:100%; height:240px; }}
 .tv {{ color:var(--accent); font-size:11px; text-decoration:none; }}
 details {{ background:var(--panel2); border:1px solid var(--border); border-radius:9px;
@@ -132,9 +99,9 @@ footer {{ color:var(--muted); font-size:12px; margin:20px 0; }}
 
 
 def head(title: str, active: int) -> str:
-    cls = ["", "", "", "", "", ""]
+    cls = ["", "", ""]
     cls[active] = "active"
-    nav = NAV.format(a0=cls[0], a1=cls[1], a2=cls[2], a3=cls[3], a4=cls[4], a5=cls[5])
+    nav = NAV.format(a0=cls[0], a1=cls[1], a2=cls[2])
     return f"""<!doctype html>
 <html lang="no">
 <head>
@@ -142,21 +109,11 @@ def head(title: str, active: int) -> str:
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta http-equiv="Content-Security-Policy" content="{CSP}">
 <meta name="referrer" content="no-referrer">
-<meta name="theme-color" content="#0b0d10">
-<link rel="manifest" href="manifest.webmanifest">
-<link rel="apple-touch-icon" href="icon-192.png">
 <title>{title} — market-analysor</title>
 <style>{css()}</style>
 </head>
 <body><div class="wrap">
 {nav}
-<script>
-if ('serviceWorker' in navigator) {{
-  window.addEventListener('load', function() {{
-    try {{ navigator.serviceWorker.register('sw.js'); }} catch (e) {{}}
-  }});
-}}
-</script>
 """
 
 
@@ -166,26 +123,9 @@ def lwc_script() -> str:
 
 
 def foot() -> str:
-    from datetime import datetime, timezone
-    gen_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     return f"""
 <footer>
   Generert {VERSION} · Data: yfinance/FRED · Metodikk: Northstar &amp; Badcharts / NFTRH ·
   <strong>Ikke finansrådgivning</strong> — ditt eget regelbaserte rammeverk.
 </footer>
-<script>
-/* B1: ferskhets-vakt — stille feil skal være synlige, ikke servert som ferske data */
-(function() {{
-  var gen = new Date("{gen_iso}");
-  var days = (Date.now() - gen.getTime()) / 86400000;
-  if (days > 3) {{
-    var b = document.createElement("div");
-    b.style.cssText = "position:sticky;bottom:0;left:0;right:0;background:#D55E00;color:#fff;" +
-      "padding:10px 16px;font-weight:700;font-size:14px;z-index:99;border-radius:8px;margin-top:12px";
-    b.textContent = "⚠ Dataene er " + Math.floor(days) + " dager gamle — det daglige bygget har " +
-      "sannsynligvis feilet. Sjekk GitHub Actions-fanen (schedule kan være deaktivert etter 60 dager uten commits).";
-    document.body.appendChild(b);
-  }}
-}})();
-</script>
 </div></body></html>"""

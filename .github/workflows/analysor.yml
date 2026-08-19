@@ -2,10 +2,8 @@ name: Market Analysor
 
 on:
   schedule:
-    # v14/D4: GitHub Actions støtter IANA-tidssone på cron (mars 2026) —
-    # én oppføring erstatter sommer/vinter-paret. Unngår hel time (droppes ved last).
-    - cron: '50 19 * * *'
-      timezone: 'Europe/Oslo'
+    - cron: '50 17 * * *'   # 19:50 Oslo (sommer, UTC+2)
+    - cron: '50 18 * * *'   # 19:50 Oslo (vinter, UTC+1)
   workflow_dispatch:
     inputs:
       force:
@@ -37,24 +35,6 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Smoke-test (fanger avkuttede/ufullstendige filer FØR bygg)
-        run: |
-          python -m compileall -q scripts
-          python - << 'EOF'
-          import sys; sys.path.insert(0, "scripts")
-          from analysor import (config, data, indicators, scoring, analytics, regime,
-                                render, portfolio, backtest, benchmarks, paper,
-                                roadmap, validation, glossary, layout, today)
-          for fn in ("render_today", "render_trend", "render_report",
-                     "render_roadmap", "render_backtest"):
-              assert hasattr(render, fn), f"MANGLER {fn} - render.py er avkuttet!"
-          for attr in ("VERSION", "INSTRUMENT_GROUPS", "CYCLICAL_IDS"):
-              assert hasattr(config, attr), f"config.py avkuttet ({attr})"
-          n = sum(len(g["instruments"]) for g in config.INSTRUMENT_GROUPS)
-          assert n >= 60, f"Instrument-universet avkuttet ({n})"
-          print("Smoke-test OK:", config.VERSION, f"({n} instrumenter)")
-          EOF
-
       - name: Backfill score-historikk (idempotent, valgfri)
         env:
           MPLBACKEND: Agg
@@ -64,8 +44,6 @@ jobs:
         env:
           MPLBACKEND: Agg
           FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
-          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           FORCE_RUN: ${{ github.event.inputs.force }}
         run: python scripts/build.py
 
@@ -105,6 +83,5 @@ jobs:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           publish_dir: ./docs
           publish_branch: gh-pages
-          keep_files: true
           user_name: github-actions[bot]
           user_email: 41898282+github-actions[bot]@users.noreply.github.com

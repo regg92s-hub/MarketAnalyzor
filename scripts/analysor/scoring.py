@@ -1,265 +1,101 @@
 """
-NSBC-score (Northstar & Badcharts evidens-klynge), 0-100.
+Northstar-score: 0-100, høyere = lavere risiko / bedre lavrisiko-entry.
 
-KORRIGERT i v6 for å matche NSBCs faktiske metodikk (fra deres dokumenter):
-  - IKKE MACD (de bruker det ikke), IKKE "lav RSI = bra entry" (mean-reversion).
-  - JA: 12 & 36 SMA Trend Navigator (over begge = bull), Ichimoku Cloud 9/26/52
-    (over sky = bull), distance % fra 36-SMA (0 = nøytral, +10% = stretched/FOMO),
-    Stochastic RSI (snur opp fra oversold), og breakout fra konsolidering.
-
-NSBCs definisjon av LAVRISIKO-ENTRY (verbatim fra dokumentene):
-  "Low risk entry points are found when price is not stretched and has just
-   broken out of a pullback/consolidation pattern."
-  Altså: IKKE stretched fra langtids-MA + nettopp brutt ut av base + over trend.
-  En stretched pris i FOMO-sonen er HØY risiko å gå inn på (selv om trenden er opp).
-
-Multi-tidsramme (NSBC): høyere tidsramme gir med-/motvind til lavere. Vi skiller
-derfor LANGTID (M/Q: regime) fra KORTTID (W: timing) i stedet for å blande alt.
+Tre tidsrammer (ukentlig/månedlig/kvartal), 33% hver. Hver tidsramme
+kombinerer RSI (lavere = bedre entry), MACD-histogram-retning og avstand
+til 36-perioders MA. Kontinuerlige delscorer (ikke terskel-hopp).
 """
 from __future__ import annotations
 import numpy as np
 import pandas as pd
 from . import indicators as ind
-from .config import PALETTE
 
 
-def frame_evidence(df: pd.DataFrame) -> dict:
+def _rsi_subscore(rsi_val: float | None) -> float:
+    """Lav RSI = bedre entry. 30->1.0, 70->0.0, lineært, klippet."""
+    if rsi_val is None or pd.isna(rsi_val):
+        return 0.5
+    return float(np.clip((70 - rsi_val) / 40.0, 0.0, 1.0))
+
+
+def _macd_subscore(hist: float | None, prev_hist: float | None) -> float:
+    """Positiv og stigende histogram = momentum opp."""
+    if hist is None or pd.isna(hist):
+        return 0.5
+    base = 0.6 if hist > 0 else 0.4
+    if prev_hist is not None and not pd.isna(prev_hist):
+        if hist > prev_hist:
+            base += 0.2
+        else:
+            base -= 0.1
+    return float(np.clip(base, 0.0, 1.0))
+
+
+def _ma_subscore(dist_pct: float | None) -> float:
     """
-    Samle NSBC-evidens for én tidsramme fra OHLC.
-    Returnerer 'ticks' (tente bevis), trend-tilstand, og om stretched.
+    Nær MA (liten |avstand|) = lavrisiko entry. Langt over = strukket (dårlig
+    entry men ikke null). Under MA = svakt.
     """
+    if dist_pct is None or pd.isna(dist_pct):
+        return 0.5
+    d = dist_pct / 100.0
+    if d >= 0:
+        return float(np.clip(1.0 - d / 0.25, 0.2, 1.0))   # 0% over=1.0, 25% over=0.2
+    return float(np.clip(0.5 + d / 0.20, 0.0, 0.5))        # under MA faller mot 0
+
+
+def frame_summary(df: pd.DataFrame) -> dict:
+    """Indikatorer for én tidsramme."""
     c = df["close_use"].dropna()
-    if len(c) < 12:
+    if len(c) < 5:
         return {}
-    high = df["high"] if "high" in df else c
-    low = df["low"] if "low" in df else c
-
-    tn = ind.trend_navigator(c, 12, 36)
-    ich = ind.ichimoku(high, low, c)
-    dist = ind.dist_from_ma(c, 36)
-    dist12 = ind.dist_from_ma(c, 12)
-    srsi = ind.stoch_rsi(c)
-    brk = ind.breakout_state(high, low, c)
-
+    rsi_s = ind.rsi(c, 14)
+    macd_line, sig, hist = ind.macd(c)
+    sma36 = ind.sma(c, 36)
+    sma50 = ind.sma(c, 50)
+    last = float(c.iloc[-1])
+    dist36 = float((last - sma36.iloc[-1]) / sma36.iloc[-1] * 100) if pd.notna(sma36.iloc[-1]) else None
     return {
-        "trend": tn.get("state"),            # bull / neutral / bear
-        "above_both_ma": tn.get("above_both", False),
-        "golden_cross": tn.get("golden_cross", False),
-        "death_cross": tn.get("death_cross", False),
-        "cloud": ich.get("position"),        # above / inside / below
-        "future_bull": ich.get("future_bull"),
-        "dist36": dist["dist"],
-        "dist12": dist12["dist"],
-        "dist_crossed_up": dist["crossed_up"],
-        "stretched": dist["stretched"],
-        "below_zero": dist.get("below_zero"),
-        "srsi_k": srsi["k"],
-        "srsi_turning_up": srsi["turning_up"],
-        "srsi_oversold": srsi["oversold"],
-        "srsi_overbought": srsi["overbought"],
-        "breakout": brk["breakout"],
-        "consolidating": brk["consolidating"],
-        "last": float(c.iloc[-1]),
+        "last": last,
+        "rsi14": float(rsi_s.iloc[-1]) if pd.notna(rsi_s.iloc[-1]) else None,
+        "macd_hist": float(hist.iloc[-1]) if pd.notna(hist.iloc[-1]) else None,
+        "macd_hist_prev": float(hist.iloc[-2]) if len(hist) > 1 and pd.notna(hist.iloc[-2]) else None,
+        "dist_to_36MA": dist36,
+        "sma50": float(sma50.iloc[-1]) if pd.notna(sma50.iloc[-1]) else None,
+        "close_above_sma50": bool(last > sma50.iloc[-1]) if pd.notna(sma50.iloc[-1]) else None,
     }
 
 
-def timeframe_state(fe: dict) -> str | None:
-    """NSBC trend-bias for tidsrammen: bull / neutral / bear."""
-    if not fe:
+def timeframe_score(fs: dict) -> float | None:
+    if not fs:
         return None
-    # Vekt av evidens: trend-navigator + sky
-    if fe["trend"] == "bull" and fe["cloud"] in ("above", "inside"):
-        return "bull"
-    if fe["trend"] == "bear" and fe["cloud"] in ("below", "inside"):
-        return "bear"
-    if fe["above_both_ma"] and fe["cloud"] == "above":
-        return "bull"
-    if fe["trend"] == "bear" or fe["cloud"] == "below":
-        return "bear"
-    return "neutral"   # sidelengs = agnostisk (NSBC: ikke bearish)
+    rs = _rsi_subscore(fs.get("rsi14"))
+    ms = _macd_subscore(fs.get("macd_hist"), fs.get("macd_hist_prev"))
+    mas = _ma_subscore(fs.get("dist_to_36MA"))
+    return (rs + ms + mas) / 3.0 * 100.0
 
 
-def entry_quality(weekly: dict, monthly: dict, quarterly: dict) -> tuple[int, dict]:
-    """
-    NSBC lavrisiko-entry-score 0-100. Høyt = ekte lavrisiko-entry slik NSBC
-    definerer det: langtid konstruktiv + korttid breakout fra base + IKKE stretched.
-
-    Bygger på 'weight of evidence' (teller tente bevis), ikke oscillator-snitt.
-    """
-    if not weekly:
-        return 50, {}
-
-    # Langtidsregime (M+Q): gir med-/motvind
-    lt_states = [timeframe_state(monthly), timeframe_state(quarterly)]
-    lt_bull = sum(1 for s in lt_states if s == "bull")
-    lt_bear = sum(1 for s in lt_states if s == "bear")
-    if lt_bull >= 1 and lt_bear == 0:
-        lt = "bull"
-    elif lt_bear >= 1 and lt_bull == 0:
-        lt = "bear"
-    else:
-        lt = "neutral"
-
-    # Korttidstiming (W)
-    st = timeframe_state(weekly)
-
-    # Evidens-ticks for entry-kvalitet (maks 6)
-    ticks = 0
-    detail = []
-    # 1. Over 12 & 36 MA (ukentlig)
-    if weekly.get("above_both_ma"):
-        ticks += 1; detail.append("over 12&36 SMA")
-    # 2. Over Ichimoku-sky
-    if weekly.get("cloud") == "above":
-        ticks += 1; detail.append("over sky")
-    # 3. Momentum gjenvunnet (distance krysset opp over 0) ELLER golden cross
-    if weekly.get("dist_crossed_up") or weekly.get("golden_cross"):
-        ticks += 1; detail.append("momentum snudd opp")
-    # 4. StochRSI snur opp (helst fra oversold)
-    if weekly.get("srsi_turning_up"):
-        ticks += 1; detail.append("StochRSI snur opp")
-    # 5. Breakout fra konsolidering (NSBCs kjernekriterium)
-    if weekly.get("breakout"):
-        ticks += 2; detail.append("breakout fra base")  # teller dobbelt
-    elif weekly.get("consolidating"):
-        ticks += 1; detail.append("bygger base")
-
-    # Score: basis fra ticks (maks ~7 -> skaler til 100)
-    raw = min(ticks / 7.0, 1.0) * 100
-
-    # Langtidsregime justerer: medvind løfter, motvind senker
-    if lt == "bull":
-        raw = raw * 1.0 + 10
-    elif lt == "bear":
-        raw = raw * 0.6      # motvind: selv en breakout er høyere risiko
-
-    # STRETCHED-STRAFF (NSBCs viktigste poeng): pris i FOMO-sonen =
-    # HØY risiko entry, ikke lav. Caps scoren hardt.
-    if weekly.get("stretched"):
-        raw = min(raw, 45)
-        detail.append("⚠ stretched (FOMO-sone)")
-    if monthly and monthly.get("stretched"):
-        raw = min(raw, 55)
-
-    # Fallende kniv-vakt: under alle MA + sky = ikke lavrisiko uansett RSI
-    if st == "bear" and not weekly.get("breakout"):
-        raw = min(raw, 30)
-
-    score = int(np.clip(round(raw), 0, 100))
-    stage = classify_stage(weekly, monthly)
-    return score, {
-        "long_term": lt, "short_term": st, "ticks": ticks,
-        "evidence": detail,
-        "stretched": bool(weekly.get("stretched")),
-        "dist36": weekly.get("dist36"),
-        "breakout": bool(weekly.get("breakout")),
-        "stage": stage["stage"],
-        "stage_label": stage["label"],
-        "stage_reason": stage["reason"],
-    }
-
-
-def classify_stage(weekly: dict, monthly: dict) -> dict:
-    """
-    Weinstein stage-analyse (1-4) — løser tvetydigheten stretched vs nedtrend.
-    NSBC nedstammer fra Weinstein (Karim siterer 'Stan Weinstein's Secrets').
-
-      Stage 1 — Basing/akkumulering: flat MA, pris pendler rundt 36-MA.
-      Stage 2 — Opptrend: over stigende 12&36 MA + over sky.
-      Stage 3 — Topping/distribusjon: flat MA etter opptur, momentum avtar.
-      Stage 4 — Nedtrend: UNDER fallende MA + under sky. (= lav score, IKKE stretched)
-
-    Stretched/FOMO er en UNDER-tilstand av Stage 2 (opptrend, men strukket) —
-    aldri det samme som Stage 4 (nedtrend). Det er kjernen i feilrettingen.
-    """
-    if not weekly:
-        return {"stage": None, "label": "Ukjent", "reason": "for lite data"}
-
-    trend = weekly.get("trend")          # bull / neutral / bear
-    cloud = weekly.get("cloud")          # above / inside / below
-    above_ma = weekly.get("above_both_ma")
-    below_zero = weekly.get("below_zero")
-    stretched = weekly.get("stretched")
-    dist = weekly.get("dist36")
-    breakout = weekly.get("breakout")
-    s_over_l = weekly.get("s_over_l", None)
-
-    # Stage 4: nedtrend — under MA og sky, fallende
-    if trend == "bear" and cloud == "below":
-        return {"stage": 4, "label": "Nedtrend (Stage 4)",
-                "reason": f"under 12&36-MA og under sky, momentum {dist:+.0f}% under null"
-                          if dist is not None else "under 12&36-MA og under sky"}
-    if (not above_ma) and below_zero and cloud in ("below", "inside"):
-        return {"stage": 4, "label": "Nedtrend (Stage 4)",
-                "reason": "under glidende snitt, negativ momentum"}
-
-    # Stage 2: opptrend — over stigende MA + over sky
-    if above_ma and cloud == "above" and trend == "bull":
-        if stretched:
-            return {"stage": 2, "label": "Strukket (FOMO-sone)",
-                    "reason": f"opptrend, men {dist:+.0f}% over 36-MA — høy risiko å gå inn, "
-                              "eier kan holde" if dist is not None else "opptrend men strukket"}
-        if breakout:
-            return {"stage": 2, "label": "Opptrend – breakout",
-                    "reason": "over stigende 12&36-MA, over sky, bryter ut av base"}
-        return {"stage": 2, "label": "Opptrend (Stage 2)",
-                "reason": "over stigende 12&36-MA og over sky"}
-
-    # Stage 3: distribusjon — var over, men momentum faller / under én MA
-    if (s_over_l or cloud == "above") and (below_zero or trend == "neutral"):
-        return {"stage": 3, "label": "Distribusjon (Stage 3)",
-                "reason": "momentum avtar etter opptur — vær varsom"}
-
-    # Stage 1: basing — flatt, rundt MA, ingen klar retning
-    return {"stage": 1, "label": "Basing (Stage 1)",
-            "reason": "pendler rundt glidende snitt — bygger mulig base"}
-
-
-def nsbc_score(frames: dict) -> tuple[int, dict]:
-    """Hovedinngang: bygg evidens per tidsramme og regn entry-kvalitet."""
-    w = frame_evidence(frames.get("weekly", pd.DataFrame()))
-    m = frame_evidence(frames.get("monthly", pd.DataFrame()))
-    q = frame_evidence(frames.get("quarterly", pd.DataFrame()))
-    score, meta = entry_quality(w, m, q)
-    meta["frames"] = {"weekly": w, "monthly": m, "quarterly": q}
-    return score, meta
-
-
-# Bakoverkompatibelt alias (build.py kaller northstar_score)
 def northstar_score(frames: dict) -> tuple[int, dict]:
-    return nsbc_score(frames)
+    """Vektet snitt over weekly/monthly/quarterly (33% hver)."""
+    parts = {}
+    vals = []
+    for tf in ("weekly", "monthly", "quarterly"):
+        fs = frame_summary(frames.get(tf, pd.DataFrame()))
+        parts[tf] = fs
+        s = timeframe_score(fs)
+        if s is not None:
+            vals.append(s)
+    score = round(sum(vals) / len(vals)) if vals else 50
+    return int(np.clip(score, 0, 100)), parts
 
 
-def score_label(score: int, meta: dict | None = None) -> tuple[str, str]:
-    """
-    (tekst, farge). KORRIGERT: skiller nedtrend fra strukket.
-    Lav score kan bety enten Stage 4 (nedtrend) ELLER strukket — aldri begge.
-    Bruk stage-etiketten når meta er tilgjengelig.
-    """
-    if meta and meta.get("stage_label"):
-        sl = meta["stage_label"]
-        if score >= 70:
-            return "Lavrisiko-entry", PALETTE["up"]
-        if "Strukket" in sl:
-            return sl, PALETTE["warn"]          # opptrend men FOMO
-        if "Nedtrend" in sl:
-            return sl, PALETTE["down"]          # Stage 4 — IKKE stretched
-        if score >= 55:
-            return sl, PALETTE["accent"]
-        if score >= 40:
-            return sl, PALETTE["warn"]
-        return sl, PALETTE["down"]
-    # Fallback uten meta
+def score_label(score: int) -> tuple[str, str]:
+    """(tekst, farge) – colorblind-trygg (blå/oransje/vermillion)."""
+    from .config import PALETTE
     if score >= 70:
-        return "Lavrisiko-entry", PALETTE["up"]
+        return "Lav risiko (god entry)", PALETTE["up"]
     if score >= 55:
-        return "Konstruktiv", PALETTE["accent"]
+        return "Moderat", PALETTE["accent"]
     if score >= 40:
-        return "Avvent base/breakout", PALETTE["warn"]
-    return "Svakt oppsett", PALETTE["down"]
-
-
-def state_label(lt: str, st: str) -> str:
-    """Langtid × korttid som lesbar etikett (NSBC kan være bull+bear samtidig)."""
-    m = {"bull": "bull", "bear": "bear", "neutral": "nøytral", None: "n/a"}
-    return f"LT {m.get(lt,'n/a')} / KT {m.get(st,'n/a')}"
+        return "Avventende", PALETTE["warn"]
+    return "Høy risiko / svak", PALETTE["down"]

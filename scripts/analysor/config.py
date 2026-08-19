@@ -12,7 +12,7 @@ Endringer fra market-daily-report (v8 -> analysor):
   - Lightweight Charts i stedet for matplotlib-PNG-er
 """
 
-VERSION = "2026-07-30-analysor-v16"
+VERSION = "2026-06-08-analysor-v1"
 
 # ──────────────────────────────────────────────────────────────────
 # INSTRUMENT-UNIVERS
@@ -89,55 +89,6 @@ INSTRUMENT_GROUPS = [
             {"id": "ETHA", "label": "Ethereum", "symbol_label": "ETH",  "candidates": ["ETH-USD"]},
         ],
     },
-    {
-        "key": "sektorer", "title": "7. SPX-sektorer", "sector": "Sektorer",
-        "instruments": [
-            {"id": "XLK", "label": "Teknologi",       "symbol_label": "XLK", "candidates": ["XLK"]},
-            {"id": "XLF", "label": "Finans",          "symbol_label": "XLF", "candidates": ["XLF"]},
-            {"id": "XLV", "label": "Helse",           "symbol_label": "XLV", "candidates": ["XLV"]},
-            {"id": "XLI", "label": "Industri",        "symbol_label": "XLI", "candidates": ["XLI"]},
-            {"id": "XLY", "label": "Forbruk syklisk", "symbol_label": "XLY", "candidates": ["XLY"]},
-            {"id": "XLP", "label": "Forbruk stabil",  "symbol_label": "XLP", "candidates": ["XLP"]},
-            {"id": "XLU", "label": "Forsyning",       "symbol_label": "XLU", "candidates": ["XLU"]},
-            {"id": "XLB", "label": "Materialer",      "symbol_label": "XLB", "candidates": ["XLB"]},
-            {"id": "XLRE","label": "Eiendom",         "symbol_label": "XLRE","candidates": ["XLRE", "IYR"]},
-            {"id": "XLC", "label": "Kommunikasjon",   "symbol_label": "XLC", "candidates": ["XLC"]},
-        ],
-    },
-    {
-        "key": "land", "title": "8. Land/regioner", "sector": "Land",
-        "instruments": [
-            {"id": "EWJ", "label": "Japan",      "symbol_label": "EWJ", "candidates": ["EWJ"]},
-            {"id": "EWG", "label": "Tyskland",   "symbol_label": "EWG", "candidates": ["EWG"]},
-            {"id": "EWU", "label": "Storbrit.",  "symbol_label": "EWU", "candidates": ["EWU"]},
-            {"id": "EWC", "label": "Canada",     "symbol_label": "EWC", "candidates": ["EWC"]},
-            {"id": "EWA", "label": "Australia",  "symbol_label": "EWA", "candidates": ["EWA"]},
-            {"id": "EWZ", "label": "Brasil",     "symbol_label": "EWZ", "candidates": ["EWZ"]},
-            {"id": "INDA","label": "India",      "symbol_label": "INDA","candidates": ["INDA", "EPI"]},
-            {"id": "FXI", "label": "Kina",       "symbol_label": "FXI", "candidates": ["FXI", "MCHI"]},
-        ],
-    },
-    {
-        "key": "renter_kreditt", "title": "9. Renter & Kreditt", "sector": "Renter & Kreditt",
-        "instruments": [
-            {"id": "IEF", "label": "7-10yr Treas", "symbol_label": "IEF", "candidates": ["IEF"]},
-            {"id": "SHY", "label": "1-3yr Treas",  "symbol_label": "SHY", "candidates": ["SHY"]},
-            {"id": "LQD", "label": "IG kreditt",   "symbol_label": "LQD", "candidates": ["LQD"]},
-            {"id": "EMB", "label": "EM obligasjon","symbol_label": "EMB", "candidates": ["EMB"]},
-            {"id": "TIP", "label": "Inflasjonssikret","symbol_label": "TIP","candidates": ["TIP"]},
-            {"id": "BIL", "label": "Statskasse 1-3m","symbol_label": "BIL","candidates": ["BIL"]},
-        ],
-    },
-    {
-        "key": "faktorer", "title": "10. Faktorer/stil", "sector": "Faktorer",
-        "instruments": [
-            {"id": "MTUM", "label": "Momentum",  "symbol_label": "MTUM", "candidates": ["MTUM"]},
-            {"id": "VLUE", "label": "Verdi",     "symbol_label": "VLUE", "candidates": ["VLUE"]},
-            {"id": "QUAL", "label": "Kvalitet",  "symbol_label": "QUAL", "candidates": ["QUAL"]},
-            {"id": "USMV", "label": "Min-vol",   "symbol_label": "USMV", "candidates": ["USMV"]},
-            {"id": "DBMF", "label": "Managed futures","symbol_label": "DBMF","candidates": ["DBMF"]},
-        ],
-    },
 ]
 
 # DPM-stil aktivaklasse (underklasse-henvisning per instrument)
@@ -151,12 +102,6 @@ ASSET_SUBCLASS = {
     "DBC": "Commodity", "USO": "Commodity", "UNG": "Commodity", "COPX": "Commodity",
     "XME": "Commodity", "XLE": "Commodity", "DBA": "Commodity", "URA": "Commodity",
     "BTC": "Crypto", "ETHA": "Crypto",
-    "XLK": "Sektor", "XLF": "Sektor", "XLV": "Sektor", "XLI": "Sektor", "XLY": "Sektor",
-    "XLP": "Sektor", "XLU": "Sektor", "XLB": "Sektor", "XLRE": "Sektor", "XLC": "Sektor",
-    "EWJ": "Land", "EWG": "Land", "EWU": "Land", "EWC": "Land", "EWA": "Land",
-    "EWZ": "Land", "INDA": "Land", "FXI": "Land",
-    "IEF": "Bonds", "SHY": "Bonds", "LQD": "Bonds", "EMB": "Bonds", "TIP": "Bonds", "BIL": "Cash",
-    "MTUM": "Faktor", "VLUE": "Faktor", "QUAL": "Faktor", "USMV": "Faktor", "DBMF": "Trend",
 }
 
 # Sykliske instrumenter for leadership ranking (alt unntatt rene edelmetaller/cash)
@@ -166,16 +111,6 @@ CYCLICAL_IDS = [
     "DBC", "USO", "UNG", "COPX", "XME", "XLE", "DBA", "URA",
     "PALL", "BTC", "ETHA",
     "TLT", "FXE", "UUP",
-    "XLK", "XLF", "XLV", "XLI", "XLY", "XLP", "XLU", "XLB", "XLRE", "XLC",
-    "EWJ", "EWG", "EWU", "EWC", "EWA", "EWZ", "INDA", "FXI",
-    "IEF", "LQD", "EMB", "TIP",
-    "MTUM", "VLUE", "QUAL", "USMV", "DBMF",
-]
-
-# Land + sektorer for global bredde-måler (% over 200d MA)
-BREADTH_GLOBAL_IDS = [
-    "XLK", "XLF", "XLV", "XLI", "XLY", "XLP", "XLU", "XLB", "XLRE", "XLC",
-    "EWJ", "EWG", "EWU", "EWC", "EWA", "EWZ", "INDA", "FXI", "SPY", "EEM",
 ]
 
 # Hovedinstrumenter for kapitalrotasjon (store trender på tvers av klasser)
@@ -196,14 +131,6 @@ CYCLICAL_PAIRS = [
 
 # TradingView-symbolmapping (krypto -> spot, ikke ETF)
 TV_SYMBOL_MAP = {"BTC": "BTCUSD", "ETH": "ETHUSD", "ETHA": "ETHUSD", "NOK": "USDNOK"}
-
-# Kuratert sett for korrelasjonsmatrise (hovedaktivaklasser – en 33x33 er uleselig)
-CORR_SET = ["SPY", "QQQ", "IWM", "EEM", "TLT", "HYG", "GLD", "SLV",
-            "DBC", "USO", "XLE", "URA", "BTC", "UUP"]
-
-# Instrumenter på RRG-scatter (leadership vs gull). Holdes lesbart.
-RRG_SET = ["SPY", "QQQ", "IWM", "EEM", "ACWI", "SOXX", "XLE", "USO", "DBC",
-           "COPX", "SLV", "GDX", "URA", "BTC", "TLT", "VNQ"]
 
 # ──────────────────────────────────────────────────────────────────
 # SIGNAL-PARAMETRE
@@ -230,31 +157,6 @@ OVERBOUGHT_RSI = 65
 OVERBOUGHT_MACD = 2
 STRETCH_36 = 0.20
 VOL_TARGET_ANNUAL = 0.12  # 12 % årlig vol-mål for posisjonsstørrelse
-
-# Backtest-realisme (rapportens funn)
-TX_COST_BPS = 15          # transaksjonskostnad per handlet notional (basispunkter)
-HYSTERESIS_ROC = 0.02     # ny kandidat må slå svakeste eierposisjon med 2 pp (ROC)
-HYSTERESIS_Z = 0.25       # tilsvarende margin i z-score-rom (mom+value-kombinert)
-BT_VOL_TARGET = 0.20      # kontinuerlig vol-skalering: eksponering = mål/realisert (Moreira & Muir)
-
-# Tranchet rebalansering (Newfound: "litt men ofte" — reduserer timing-flaks)
-TRANCHE_FRACTION = 0.25   # korriger 25 % av avviket mot mål per omfordeling
-
-# Value-tilt i rotasjonen (Asness 2013: value+momentum er negativt korrelert,
-# kombinasjonen demper momentum-krasj og senker turnover)
-VALUE_WEIGHT = 0.5        # vekt på value-z-score relativt til momentum-z-score
-VALUE_LOOKBACK_M = 60     # value-proxy = negativ 5-års relativ avkastning (reversal)
-
-# Panikk-regime (Daniel & Moskowitz 2016: momentum krasjer i rebound etter
-# bear-marked med høy vol). Når begge er sanne: eksponering caps på 0.5.
-PANIC_RET_LOOKBACK_M = 12
-PANIC_VOL_LOOKBACK_M = 6
-PANIC_VOL_THRESHOLD = 0.25  # >25 % annualisert SPY-vol
-PANIC_EXPOSURE_CAP = 0.5
-
-# Paper-ledger ("regelen vs deg"): hypotetisk portefølje som følger regelen
-PAPER_TOP_N = 5
-PAPER_START_NOK = 100000.0
 
 # Risikometrikker
 RISK_LOOKBACK_DAYS = 252  # 1 år for vol/Sharpe/drawdown
@@ -299,29 +201,3 @@ def all_instruments():
             d["subclass"] = ASSET_SUBCLASS.get(inst["id"], "")
             out.append(d)
     return out
-
-
-# ── C1 (v14): Norsk kjøpbarhet — PRIIPs/KID-blokk + ASK-kvalifisering ────────
-# Norske retail-investorer kan IKKE kjøpe US-noterte ETF-er (PRIIPs/KID-krav
-# siden 1. okt 2024; eksisterende beholdning kan holdes/selges). Aksjesparekonto
-# (ASK) krever i tillegg EØS-hjemmehørende fond med >=80% aksjeandel.
-# alt = verifisert UCITS-ekvivalent (Irland/Lux) der en finnes.
-# Default for alt som IKKE står her: US-domisilert -> buyable=False, ask=False.
-NO_ACCESS_DEFAULT = {"buyable": False, "ask": False, "alt": None}
-NO_ACCESS = {
-    "EXSA": {"buyable": True, "ask": True, "alt": None},  # iShares STOXX Europe 600, EØS-domisilert
-    "BTC":  {"buyable": True, "ask": False, "alt": "kryptobørs (utenfor PRIIPs)"},
-    "ETHA": {"buyable": True, "ask": False, "alt": "kryptobørs (utenfor PRIIPs)"},
-    "SPY":  {"buyable": False, "ask": False, "alt": "CSPX (IE00B5BMR087) / VUAA (IE00BFMXXD54)"},
-    "QQQ":  {"buyable": False, "ask": False, "alt": "EQQQ (IE0032077012) / CNDX (IE00B53SZB19)"},
-    "SOXX": {"buyable": False, "ask": False, "alt": "VVSM VanEck Semiconductor UCITS (IE00BMC38736)"},
-    "GDX":  {"buyable": False, "ask": False, "alt": "G2X VanEck Gold Miners UCITS (IE00BQQP9F84)"},
-    "GDXJ": {"buyable": False, "ask": False, "alt": "G2XJ VanEck Junior Gold Miners UCITS (IE00BQQP9G91)"},
-    "EEM":  {"buyable": False, "ask": False, "alt": "EIMI iShares Core MSCI EM IMI (IE00BKM4GZ66)"},
-    "GLD":  {"buyable": False, "ask": False, "alt": "IGLN iShares Physical Gold ETC (IE00B4ND3602) — ETC, ikke ASK"},
-}
-
-
-def no_access(iid: str) -> dict:
-    """Kjøpbarhets-info for norsk retail. Se NO_ACCESS-kommentaren."""
-    return NO_ACCESS.get(iid, NO_ACCESS_DEFAULT)

@@ -32,26 +32,15 @@ def fetch_one(candidates: list, period: str = "max") -> tuple[pd.DataFrame | Non
                 if df is not None and not df.empty and len(df) > 30:
                     out = pd.DataFrame(index=df.index)
                     # auto_adjust=True -> 'Close' er justert
+                    close_col = "Close" if "Close" in df.columns else df.columns[0]
                     if isinstance(df.columns, pd.MultiIndex):
-                        def col(name):
-                            m = [c for c in df.columns if c[0] == name]
-                            return df[m[0]] if m else None
-                        out["close_use"] = col("Close")
-                        out["high"] = col("High")
-                        out["low"] = col("Low")
-                        out["open"] = col("Open")
-                        vol = col("Volume")
-                        out["volume"] = vol if vol is not None else np.nan
+                        close_col = [c for c in df.columns if c[0] == "Close"][0]
+                        vol_col = [c for c in df.columns if c[0] == "Volume"]
+                        out["close_use"] = df[close_col]
+                        out["volume"] = df[vol_col[0]] if vol_col else np.nan
                     else:
                         out["close_use"] = df["Close"]
-                        out["high"] = df.get("High")
-                        out["low"] = df.get("Low")
-                        out["open"] = df.get("Open")
                         out["volume"] = df.get("Volume", np.nan)
-                    # Fallback: hvis high/low mangler, bruk close
-                    for c in ("high", "low", "open"):
-                        if c not in out or out[c].isna().all():
-                            out[c] = out["close_use"]
                     out = out.dropna(subset=["close_use"])
                     out.index = pd.to_datetime(out.index).tz_localize(None)
                     _log(f"  yf ok: {sym}")
@@ -60,44 +49,14 @@ def fetch_one(candidates: list, period: str = "max") -> tuple[pd.DataFrame | Non
                 if attempt == 2:
                     _log(f"  yf feil {sym}: {e}")
                 time.sleep(1.0)
-    # D3 (v14): Stooq-fallback — gratis CSV, ingen nøkkel. Kun enkle US-tickere
-    # (ikke ^indekser, -USD-kryptopar eller =F-futures). NB: Stooq gir RÅ close
-    # (ikke utbyttejustert) — godt nok som gap-filler så bygget ikke velter,
-    # men flagges i loggen. yfinance er fortsatt primærkilde.
-    for sym in candidates:
-        if any(ch in sym for ch in ("^", "=", "-")):
-            continue
-        try:
-            import requests as _rq
-            url = f"https://stooq.com/q/d/l/?s={sym.lower()}.us&i=d"
-            r = _rq.get(url, timeout=20)
-            if r.status_code == 200 and r.text.startswith("Date,"):
-                from io import StringIO
-                sdf = pd.read_csv(StringIO(r.text), parse_dates=["Date"], index_col="Date")
-                if len(sdf) > 30:
-                    out = pd.DataFrame(index=sdf.index)
-                    out["close_use"] = sdf["Close"]
-                    out["high"] = sdf.get("High", sdf["Close"])
-                    out["low"] = sdf.get("Low", sdf["Close"])
-                    out["open"] = sdf.get("Open", sdf["Close"])
-                    out["volume"] = sdf.get("Volume", np.nan)
-                    out = out.dropna(subset=["close_use"])
-                    out.index = pd.to_datetime(out.index).tz_localize(None)
-                    _log(f"  STOOQ-FALLBACK brukt for {sym} (rå close, ikke utbyttejustert)")
-                    return out, sym
-        except Exception as e:
-            _log(f"  stooq feil {sym}: {e}")
     return None, None
 
 
 def resample_frames(df: pd.DataFrame) -> dict:
-    """Returner {daily, weekly, monthly, quarterly} med OHLC + volume."""
+    """Returner {daily, weekly, monthly, quarterly} med close_use + volume."""
     def rs(rule):
         out = pd.DataFrame()
         out["close_use"] = df["close_use"].resample(rule).last()
-        out["high"] = df["high"].resample(rule).max() if "high" in df else out["close_use"]
-        out["low"] = df["low"].resample(rule).min() if "low" in df else out["close_use"]
-        out["open"] = df["open"].resample(rule).first() if "open" in df else out["close_use"]
         out["volume"] = df["volume"].resample(rule).sum() if "volume" in df else np.nan
         return out.dropna(subset=["close_use"])
     return {
