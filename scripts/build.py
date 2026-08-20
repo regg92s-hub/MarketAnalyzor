@@ -894,7 +894,21 @@ def notify_discord(changes: list, user_val: dict | None = None):
 
 
 def write_pwa_assets():
-    """Skriv manifest, service worker og to ikoner (PWA-installasjon + offline)."""
+    """Skriv manifest, service worker og to ikoner (PWA-installasjon + offline).
+
+    v19-FIKS: CACHE-navnet var tidligere en hardkodet, uforanderlig streng
+    ('analysor-v5') — identisk i hvert daglige bygg. Nettlesere oppdaterer kun
+    en service worker når filens BYTES faktisk endrer seg; siden sw.js aldri
+    endret seg, ble den installerte service workeren VARIG værende på det den
+    cachet ved aller første besøk — derfor virket siden kun i inkognito
+    (som ikke har noen lagret service worker). Nå: cache-navnet inkluderer
+    VERSION, så sw.js blir bytes-forskjellig hver dag -> nettleseren
+    oppdager endringen, installerer på nytt, rydder gammel cache
+    (activate-handleren gjorde alltid dette riktig, den fikk bare aldri
+    sjansen). I tillegg: HTML-sider er nå network-first (faller tilbake til
+    cache kun offline) i stedet for cache-first — mer robust enn å stole på
+    at service worker-oppdateringen alltid treffer i tide.
+    """
     manifest = {
         "name": "MarketAnalyzor", "short_name": "Analysor",
         "start_url": ".", "scope": ".", "display": "standalone",
@@ -907,9 +921,8 @@ def write_pwa_assets():
     }
     (DOCS / "manifest.webmanifest").write_text(json.dumps(manifest), encoding="utf-8")
 
-    # Service worker: network-first for data (.json), cache-first for resten.
-    sw = """const CACHE = 'analysor-v5';
-const CORE = ['./','./index.html','./trend.html','./report.html','./roadmap.html','./portfolio.html','./backtest.html',
+    sw = """const CACHE = 'analysor-__VERSION__';
+const CORE = ['./','./index.html','./trend.html','./report.html','./roadmap.html','./portfolio.html','./backtest.html','./screener.html',
   './lightweight-charts.standalone.production.js','./manifest.webmanifest'];
 self.addEventListener('install', e => {
   e.waitUntil(caches.open(CACHE).then(c => c.addAll(CORE)).then(()=>self.skipWaiting()));
@@ -920,15 +933,16 @@ self.addEventListener('activate', e => {
 });
 self.addEventListener('fetch', e => {
   const url = e.request.url;
-  if (url.endsWith('.json')) {                       // data: network-first
+  const isHtmlNav = e.request.mode === 'navigate' || url.endsWith('.html') || url.endsWith('/');
+  if (url.endsWith('.json') || isHtmlNav) {         // data + sider: network-first, ALDRI stale HTML
     e.respondWith(fetch(e.request).then(r => {
       const cp = r.clone(); caches.open(CACHE).then(c => c.put(e.request, cp)); return r;
     }).catch(() => caches.match(e.request)));
-  } else {                                           // shell: cache-first
+  } else {                                           // statiske ressurser (chart-lib, ikoner): cache-first
     e.respondWith(caches.match(e.request).then(r => r || fetch(e.request)));
   }
 });
-"""
+""".replace("__VERSION__", VERSION)
     (DOCS / "sw.js").write_text(sw, encoding="utf-8")
 
     # Ikoner: ren-Python PNG (ingen Pillow). Mørk bakgrunn + blå trekant (opp).

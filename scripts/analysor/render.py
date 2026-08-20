@@ -7,6 +7,7 @@ from __future__ import annotations
 import html
 import json
 from .config import PALETTE, tv_symbol
+from .stock_universe import screener_tv_url, screener_yahoo_url
 from . import layout
 from . import glossary
 from .scoring import score_label
@@ -1511,6 +1512,10 @@ def _screener_row(r, kind):
     tkr = html.escape(r["ticker"])
     sec = html.escape(r.get("sector", ""))
     reg = html.escape(r.get("region_label", ""))
+    tv_url = html.escape(screener_tv_url(r["ticker"]))
+    yh_url = html.escape(screener_yahoo_url(r["ticker"]))
+    links = (f'<a class="tv" href="{tv_url}" target="_blank" rel="noopener" title="TradingView-chart">📊</a> '
+            f'<a class="tv" href="{yh_url}" target="_blank" rel="noopener" title="Yahoo Finance">💹</a>')
 
     if kind == "growth":
         score = r.get("growth_score", 0)
@@ -1536,7 +1541,8 @@ def _screener_row(r, kind):
            f'<td style="font-weight:700;color:{scorecol};font-size:12px">{badgetxt}</td>'
            f'<td style="font-size:10.5px;line-height:1.9">{badges}</td>'
            f'<td style="text-align:center">{ask}</td>'
-           f'<td style="text-align:center">{insider_html}</td></tr>')
+           f'<td style="text-align:center">{insider_html}</td>'
+           f'<td style="text-align:center;white-space:nowrap">{links}</td></tr>')
 
 
 def render_screener(data) -> str:
@@ -1566,7 +1572,7 @@ def render_screener(data) -> str:
         out.append(f'<section class="section"><h2>{title}</h2>'
                    f'<p class="sub">{n_qual} av {len(rows)} viste kandidater oppfyller ALLE krav fullt ut.</p>'
                    '<div style="overflow-x:auto"><table><thead><tr>'
-                   '<th>Selskap</th><th>Status</th><th>Detaljer</th><th>ASK</th><th>Innsidekjøp (90d)</th>'
+                   '<th>Selskap</th><th>Status</th><th>Detaljer</th><th>ASK</th><th>Innsidekjøp (90d)</th><th>Lenker</th>'
                    '</tr></thead><tbody>')
         for r in rows:
             out.append(_screener_row(r, kind))

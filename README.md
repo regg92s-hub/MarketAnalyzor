@@ -628,3 +628,35 @@ yfinance, SEC, Discord) kan ikke testes fra et nettverksbegrenset miljø —
 første ekte kjøring i GitHub Actions er den endelige verifiseringen.
 
 **Ikke finansrådgivning — startpunkt for egen analyse, ikke en anbefaling.**
+
+## v19: PWA-cache-bug fikset, TradingView/Yahoo-lenker på screener
+
+**Kritisk fiks: service worker cachet siden permanent.** `CACHE`-navnet i
+`sw.js` var en hardkodet streng (`'analysor-v5'`) som ALDRI endret seg
+mellom daglige bygg. Nettlesere oppdaterer kun en installert service worker
+når filen er byte-forskjellig fra sist — siden sw.js var identisk hver dag,
+oppdaget nettleseren aldri en endring, og siden forble låst til det som ble
+hentet ved aller første besøk. Inkognito har ingen lagret service worker og
+hentet derfor alltid ferskt — derfor virket det kun der. Fikset på to måter:
+(1) cache-navnet inkluderer nå `VERSION`, så sw.js blir bytes-forskjellig
+hver dag og tvinger frem en reell oppdatering; (2) HTML-sider er byttet fra
+cache-first til **network-first** (faller kun tilbake til cache når du er
+offline) — mer robust enn å stole på at oppdateringssyklusen alltid treffer
+i tide. `screener.html` er også lagt til i kjerne-cachen.
+
+**Hvis siden fortsatt viser gammelt innhold i vanlig nettleser etter denne
+deployen:** dette er den SISTE gangen — gammel service worker må ryddes
+manuelt én gang (F12 → Application → Service Workers → Unregister → last
+siden på nytt). Etter det skal v19s versjonerte cache holde seg selv
+oppdatert automatisk for alle fremtidige bygg.
+
+**TradingView- og Yahoo Finance-lenker på Aksje-screener.** Hver rad har nå
+📊 (TradingView-chart) og 💹 (Yahoo Finance-detaljer). TradingView krever
+BØRS:SYMBOL-format, ikke Yahoo sitt suffiks-format — egen oversetter i
+`stock_universe.py` (`.DE`→XETR, `.OL`→OSL, `.ST`→OMXSTO, `.CO`→OMXCOP,
+`.HE`→OMXHEX, `.TO`→TSX, aksjeklasser `VOLV-B`→`VOLV_B`; USA uten suffiks
+sendes rått til TradingViews eget søk). Yahoo-lenken trenger ingen
+oversettelse — vi henter allerede fundamentaldata via yfinance, som bruker
+nøyaktig samme ticker-format som Yahoo Finance selv.
+
+**Ikke finansrådgivning.**

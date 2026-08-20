@@ -162,3 +162,33 @@ SEED_UNIVERSE = [
 
 # CIK-oppslag (for SEC-innsidesignal) må skje dynamisk via SEC sin egen
 # ticker->CIK-fil (company_tickers.json) — bygges i screener.py, ikke her.
+
+# v19: TradingView bruker EXCHANGE:SYMBOL, ikke Yahoo sitt børs-suffiks.
+# Egen oversetter for aksje-screeneren (ETF/krypto-universet har sin egen
+# tv_symbol() i config.py).
+_TV_EXCHANGE = {"DE": "XETR", "NO": "OSL", "SE": "OMXSTO", "DK": "OMXCOP",
+               "FI": "OMXHEX", "CA": "TSX"}
+_SUFFIX_TO_REGION = {"DE": "DE", "OL": "NO", "ST": "SE", "CO": "DK", "HE": "FI", "TO": "CA"}
+
+
+def screener_tv_symbol(ticker: str) -> str:
+    """Yahoo-ticker (f.eks. 'VOLV-B.ST', 'RHM.DE', 'AAPL') -> TradingView-symbol."""
+    if "." not in ticker:
+        return ticker  # USA: ingen suffiks, la TradingViews søk resolve NYSE/NASDAQ
+    base, suffix = ticker.rsplit(".", 1)
+    region = _SUFFIX_TO_REGION.get(suffix, "")
+    exch = _TV_EXCHANGE.get(region)
+    base_tv = base.replace("-", "_")  # aksjeklasser: Yahoo bruker "-", TradingView "_"
+    return f"{exch}:{base_tv}" if exch else base_tv
+
+
+def screener_tv_url(ticker: str) -> str:
+    import urllib.parse
+    return f"https://www.tradingview.com/chart/?symbol={urllib.parse.quote(screener_tv_symbol(ticker))}"
+
+
+def screener_yahoo_url(ticker: str) -> str:
+    """Yahoo Finance-lenke. Ingen oversettelse nødvendig — vi henter allerede
+    fundamentaldata VIA yfinance, så ticker-formatet er identisk med Yahoo sitt eget."""
+    import urllib.parse
+    return f"https://finance.yahoo.com/quote/{urllib.parse.quote(ticker)}"
