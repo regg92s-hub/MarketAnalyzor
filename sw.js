@@ -1,5 +1,5 @@
-const CACHE = 'analysor-v5';
-const CORE = ['./','./index.html','./trend.html','./report.html','./roadmap.html','./portfolio.html','./backtest.html',
+const CACHE = 'analysor-2026-08-21-analysor-v19';
+const CORE = ['./','./index.html','./trend.html','./report.html','./roadmap.html','./portfolio.html','./backtest.html','./screener.html',
   './lightweight-charts.standalone.production.js','./manifest.webmanifest'];
 self.addEventListener('install', e => {
   e.waitUntil(caches.open(CACHE).then(c => c.addAll(CORE)).then(()=>self.skipWaiting()));
@@ -10,11 +10,12 @@ self.addEventListener('activate', e => {
 });
 self.addEventListener('fetch', e => {
   const url = e.request.url;
-  if (url.endsWith('.json')) {                       // data: network-first
+  const isHtmlNav = e.request.mode === 'navigate' || url.endsWith('.html') || url.endsWith('/');
+  if (url.endsWith('.json') || isHtmlNav) {         // data + sider: network-first, ALDRI stale HTML
     e.respondWith(fetch(e.request).then(r => {
       const cp = r.clone(); caches.open(CACHE).then(c => c.put(e.request, cp)); return r;
     }).catch(() => caches.match(e.request)));
-  } else {                                           // shell: cache-first
+  } else {                                           // statiske ressurser (chart-lib, ikoner): cache-first
     e.respondWith(caches.match(e.request).then(r => r || fetch(e.request)));
   }
 });
