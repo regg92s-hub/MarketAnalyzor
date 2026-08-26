@@ -94,10 +94,13 @@ assert not list(OUT_DIR.glob("_screener_chunk_*.json")), "Chunk-filer ble ikke r
 
 data1 = json.loads((OUT_DIR / "screener.json").read_text(encoding="utf-8"))
 assert len(data1["growth"]) >= 15 and len(data1["value"]) >= 15
+assert "growth_upside" in data1, "growth_upside (v20) mangler i screener.json"
 assert data1["n_universe"] > 115, f"Univers ikke utvidet: {data1['n_universe']}"
 html1 = (OUT_DIR / "screener.html").read_text(encoding="utf-8")
 assert len(html1) > 20000 and "Vekstaksjer" in html1 and "Valueaksjer" in html1
-print(f"UKE 1 OK: univers={data1['n_universe']}, vekst={len(data1['growth'])}, value={len(data1['value'])}")
+assert "Vekst med oppside" in html1, "v20-seksjonen mangler i screener.html"
+print(f"UKE 1 OK: univers={data1['n_universe']}, vekst={len(data1['growth'])}, "
+     f"value={len(data1['value'])}, vekst-med-oppside={len(data1['growth_upside'])}")
 
 # === Uke 2: simuler at ett nytt selskap kvalifiserer (test Discord-diff) ===
 _EXTREME_TICKERS.add("DYN5")
@@ -105,9 +108,10 @@ _EXTREME_TICKERS.add("DYN5")
 for i in range(TOTAL):
     build_screener.cmd_fetch_chunk(i, TOTAL)
 new_entrants_captured = {}
-def _capture(ng, nv):
+def _capture(ng, nv, nu=None):
     new_entrants_captured["growth"] = [r["ticker"] for r in ng]
     new_entrants_captured["value"] = [r["ticker"] for r in nv]
+    new_entrants_captured["upside"] = [r["ticker"] for r in (nu or [])]
 build_screener._discord_notify_new_entrants = _capture
 build_screener.cmd_merge(TOTAL)
 

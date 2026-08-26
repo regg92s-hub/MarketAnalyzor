@@ -83,9 +83,10 @@ def _load_prev_screener():
     return "_FETCH_FAILED"
 
 
-def _discord_notify_new_entrants(new_growth, new_value):
+def _discord_notify_new_entrants(new_growth, new_value, new_upside=None):
+    new_upside = new_upside or []
     url = os.environ.get("DISCORD_WEBHOOK_URL", "")
-    if not url or (not new_growth and not new_value):
+    if not url or (not new_growth and not new_value and not new_upside):
         return
     try:
         import requests
@@ -102,10 +103,17 @@ def _discord_notify_new_entrants(new_growth, new_value):
                 eps = r.get("eps_yoy")
                 extra = f" — EPS YoY {eps:+.0f}%" if eps is not None else ""
                 lines.append(f"• {r['display_name']} ({r['ticker']}, {r['region_label']}){extra}")
+        if new_upside:
+            lines.append("**🚀 Nye i Vekst med oppside-topp-20:**")
+            for r in new_upside:
+                up = r.get("target_upside")
+                extra = f" — analytiker-oppside {up:+.0f}%" if up is not None else ""
+                lines.append(f"• {r['display_name']} ({r['ticker']}, {r['region_label']}){extra}")
         lines.append("Se full liste: screener.html")
         payload = {"content": "\n".join(lines)[:1900]}
         requests.post(url, json=payload, timeout=15)
-        log(f"Discord-varsel sendt: {len(new_growth)} nye vekst, {len(new_value)} nye value")
+        log(f"Discord-varsel sendt: {len(new_growth)} nye vekst, {len(new_value)} nye value, "
+           f"{len(new_upside)} nye vekst-med-oppside")
     except Exception as e:
         log(f"  Discord-varsel feilet: {e}")
 
@@ -157,9 +165,11 @@ def cmd_merge(total: int):
     if prev not in (None, "_FETCH_FAILED"):
         prev_growth_ids = {r["ticker"] for r in prev.get("growth", [])}
         prev_value_ids = {r["ticker"] for r in prev.get("value", [])}
+        prev_upside_ids = {r["ticker"] for r in prev.get("growth_upside", [])}
         new_growth = [r for r in result["growth"] if r["ticker"] not in prev_growth_ids]
         new_value = [r for r in result["value"] if r["ticker"] not in prev_value_ids]
-        _discord_notify_new_entrants(new_growth, new_value)
+        new_upside = [r for r in result["growth_upside"] if r["ticker"] not in prev_upside_ids]
+        _discord_notify_new_entrants(new_growth, new_value, new_upside)
     elif prev == "_FETCH_FAILED":
         log("  Forrige screener.json kunne ikke hentes — hopper over "
            "nye-selskap-varsel denne uken (unngår falske positiver).")
@@ -168,7 +178,8 @@ def cmd_merge(total: int):
 
     with open(DOCS / "screener.json", "w", encoding="utf-8") as f:
         json.dump(result, f, ensure_ascii=False, separators=(",", ":"))
-    log(f"screener.json skrevet ({len(result['growth'])} vekst, {len(result['value'])} value)")
+    log(f"screener.json skrevet ({len(result['growth'])} vekst, {len(result['value'])} value, "
+       f"{len(result['growth_upside'])} vekst-med-oppside)")
 
     html = render.render_screener(result)
     (DOCS / "screener.html").write_text(html, encoding="utf-8")

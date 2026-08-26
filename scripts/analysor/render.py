@@ -1492,9 +1492,9 @@ def _roadmap_block(rm, sym) -> str:
         f'</div>')
 
 
-# ── Aksje-screener (v17, ukentlig bygg) ─────────────────────────────
+# ── Aksje-screener (v17, ukentlig bygg; v20: "Vekst med oppside") ───
 def _screener_row(r, kind):
-    """kind: 'growth' eller 'value'. Bygger én tabellrad med tydelig
+    """kind: 'growth', 'value' eller 'upside'. Bygger én tabellrad med tydelig
     oppfyllelses-badge per krav (grønn=oppfylt, grå=ikke oppfylt/ukjent)."""
     def badge(val, ok, label, suffix="%"):
         if val is None:
@@ -1502,8 +1502,9 @@ def _screener_row(r, kind):
         col = PALETTE["up"] if ok else PALETTE["down"]
         return f'<span style="color:{col};font-size:10.5px;font-weight:600">{label}: {val:+.1f}{suffix}</span>'
 
-    ask = ('<span style="color:' + PALETTE["up"] + '">🇳🇴 ASK</span>' if r.get("ask_eligible")
-           else '<span class="muted">ikke ASK</span>')
+    ask = ('<span style="color:' + PALETTE["up"] + '" title="EØS-domisilert — kjøpbar på Aksjesparekonto med utsatt/skattefri gevinst">🇳🇴 ASK</span>'
+           if r.get("ask_eligible") else
+           '<span class="muted" title="Fullt handlbar via Nordnet Zero-konto — bare uten ASK-ens skattefordel (USA/Canada/Storbritannia er ikke EØS)">Zero</span>')
     ins = r.get("insider_buy")
     insider_html = ('<span style="color:' + PALETTE["up"] + ';font-weight:700">👤 Kjøp</span>' if ins is True
                     else ('<span class="muted">–</span>' if ins is False
@@ -1524,7 +1525,7 @@ def _screener_row(r, kind):
                  + " " + badge(r.get("rev_qoq"), (r.get("rev_qoq") or -999) > 40, "QoQ"))
         scorecol = PALETTE["up"] if qual else (PALETTE["warn"] if score == 1 else "var(--muted)")
         badgetxt = "✅ Kvalifisert" if qual else f"{score}/2 krav"
-    else:
+    elif kind == "value":
         score = r.get("value_score", 0)
         qual = r.get("value_qualified")
         badges = (badge(r.get("eps_yoy"), (r.get("eps_yoy") or -999) > 50, "EPS YoY")
@@ -1535,6 +1536,23 @@ def _screener_row(r, kind):
                           else '<span class="muted" style="font-size:10.5px">D/E: ukjent</span>'))
         scorecol = PALETTE["up"] if qual else (PALETTE["warn"] if score >= 2 else "var(--muted)")
         badgetxt = "✅ Kvalifisert" if qual else f"{score}/4 krav"
+    else:  # upside — v20: "Vekst med oppside"
+        score = r.get("upside_score", 0)
+        qual = r.get("upside_qualified")
+        peg = r.get("peg")
+        dist200 = r.get("dist200")
+        upside = r.get("target_upside")
+        peg_ok = peg is not None and 0 < peg < 2
+        dist_ok = dist200 is not None and dist200 < 25
+        upside_ok = upside is not None and upside > 10
+        badges = (
+            (f'<span style="color:{PALETTE["up"] if peg_ok else PALETTE["down"]};font-size:10.5px;'
+             f'font-weight:600">PEG: {peg:.2f}</span>' if peg is not None
+             else '<span class="muted" style="font-size:10.5px">PEG: ukjent</span>')
+            + " " + badge(dist200, dist_ok, "Fra 200d-snitt")
+            + " " + badge(upside, upside_ok, "Analytiker-mål"))
+        scorecol = PALETTE["up"] if qual else (PALETTE["warn"] if score >= 1 else "var(--muted)")
+        badgetxt = "✅ Kvalifisert" if qual else f"{score}/3 krav"
 
     return (f'<tr><td><strong>{name}</strong><br><span class="muted" style="font-size:11px">'
            f'{tkr} · {reg} · {sec}</span></td>'
@@ -1549,34 +1567,66 @@ def render_screener(data) -> str:
     P = layout.head("Aksje-screener", 6)
     out = [P, '<h1>🔍 Aksje-screener</h1>',
            f'<p class="sub">Ukentlig skann av et kuratert univers ({data.get("n_universe", 0)} '
-           f'selskaper på tvers av tyske, skandinaviske, kanadiske og amerikanske børser). '
+           f'selskaper på tvers av tyske, skandinaviske, nederlandske, franske (Euronext), '
+           f'britiske, kanadiske og amerikanske børser). '
            f'Sist kjørt: {html.escape(data.get("generated", "–"))} · '
            f'{data.get("n_scanned", 0)}/{data.get("n_universe", 0)} tickere ga data denne runden. '
            '<strong>Dette er en startliste for egen analyse — ikke en kjøpsanbefaling.</strong></p>']
 
     out.append('<div class="explain" style="margin-bottom:14px"><span class="ex-what">'
-               '<strong>Vekst</strong>: omsetningsvekst YoY &gt; 50% OG QoQ &gt; 40%. '
-               '<strong>Value</strong>: EPS-vekst YoY &gt; 50% OG QoQ &gt; 40% OG margin &gt; 10% OG D/E &lt; 1,2. '
-               'QoQ &gt; 40% er en svært streng, sjelden kombinasjon for etablerte selskaper — '
-               'rangeringen viser derfor ALLE kandidater sortert på antall oppfylte krav, ikke bare '
-               'de som treffer alt. Sjekk badgene per aksje. Innsidekjøp er kun tilgjengelig for '
-               'amerikanske aksjer (SEC Form 4, gratis kilde) — Tyskland/Norden/Canada mangler en '
-               'tilsvarende strukturert gratis kilde og vises som "n/a".</span></div>')
+               '<strong>Vekst</strong> og <strong>Value</strong> svarer begge kun på ETT spørsmål: '
+               '<em>har selskapet vokst?</em> <strong>Vekst</strong> = omsetningsvekst YoY &gt; 50% OG '
+               'QoQ &gt; 40%. <strong>Value</strong> = EPS-vekst YoY &gt; 50% OG QoQ &gt; 40% OG margin '
+               '&gt; 10% OG D/E &lt; 1,2. Problemet: en aksje kan ha steget 300% og troner øverst på '
+               'vekstlisten uten at det er noe igjen å hente — "vokser rett og bra" og "har fortsatt mye '
+               'kursoppside igjen" er to forskjellige spørsmål. <strong>🚀 Vekst med oppside</strong> '
+               'svarer på det andre spørsmålet: blant aksjene som faktisk vokser, rangeres de etter tre '
+               'fremoverskuende mål — <strong>PEG-ratio</strong> &lt; 2 (er prisen fornuftig relativt til '
+               'inntjeningsveksten), <strong>avstand fra 200-dagers snitt</strong> &lt; 25% (er den '
+               'allerede strukket), og <strong>analytikernes kursmål</strong> &gt; 10% over dagens kurs '
+               '(ser markedet fortsatt oppside). QoQ &gt; 40% er en svært streng, sjelden kombinasjon for '
+               'etablerte selskaper — alle tre listene viser derfor ALLE kandidater sortert på antall '
+               'oppfylte krav, ikke bare de som treffer alt. Sjekk badgene per aksje. '
+               'Innsidekjøp er kun tilgjengelig for amerikanske aksjer (SEC Form 4, gratis kilde) — de '
+               'andre børsene mangler en tilsvarende strukturert gratis kilde og vises som "n/a". '
+               'PEG og analytiker-kursmål er ærlig talt mer konsistent tilgjengelig for amerikanske og '
+               'store europeiske aksjer enn for mindre nordiske selskaper i yfinances gratis-data — der '
+               'vil du oftere se "ukjent" på disse to. Det er ikke en feil, det er dekningsgrensen i '
+               'gratisdata, og den vises som "ukjent" i stedet for å gjette.</span></div>')
 
-    for kind, title, rows in (("growth", "📈 Vekstaksjer", data.get("growth", [])),
-                              ("value", "💎 Valueaksjer", data.get("value", []))):
+    sections = (
+        ("growth", "📈 Vekstaksjer", data.get("growth", []),
+         ["Selskap", "Status", "Detaljer", "ASK/Zero", "Innsidekjøp (90d)", "Lenker"]),
+        ("value", "💎 Valueaksjer", data.get("value", []),
+         ["Selskap", "Status", "Detaljer", "ASK/Zero", "Innsidekjøp (90d)", "Lenker"]),
+        ("upside", "🚀 Vekst med oppside", data.get("growth_upside", []),
+         ["Selskap", "Status", "PEG / 200d-snitt / analytiker-mål", "ASK/Zero", "Innsidekjøp (90d)", "Lenker"]),
+    )
+    qual_key = {"growth": "growth_qualified", "value": "value_qualified", "upside": "upside_qualified"}
+    for kind, title, rows, cols in sections:
         if not rows:
             out.append(f'<section class="section"><h2>{title}</h2><p class="muted">Ingen data ennå.</p></section>')
             continue
-        n_qual = sum(1 for r in rows if r.get(f"{kind}_qualified"))
+        n_qual = sum(1 for r in rows if r.get(qual_key[kind]))
+        table_id = f"screener-{kind}"
+        filter_id = f"{table_id}-filter"
+        th = "".join(f"<th>{c}</th>" for c in cols)
         out.append(f'<section class="section"><h2>{title}</h2>'
                    f'<p class="sub">{n_qual} av {len(rows)} viste kandidater oppfyller ALLE krav fullt ut.</p>'
-                   '<div style="overflow-x:auto"><table><thead><tr>'
-                   '<th>Selskap</th><th>Status</th><th>Detaljer</th><th>ASK</th><th>Innsidekjøp (90d)</th><th>Lenker</th>'
-                   '</tr></thead><tbody>')
+                   f'<input id="{filter_id}" type="text" placeholder="Filtrer på selskap, ticker, sektor, land..." '
+                   f'oninput="filterScreenerTable(\'{filter_id}\',\'{table_id}\')" '
+                   f'style="width:100%;max-width:340px;padding:7px 10px;margin:0 0 8px;background:var(--panel2);'
+                   f'border:1px solid var(--border);border-radius:7px;color:var(--text);font-size:13px">'
+                   f'<div style="overflow-x:auto"><table id="{table_id}"><thead><tr>{th}</tr></thead><tbody>')
         for r in rows:
             out.append(_screener_row(r, kind))
         out.append('</tbody></table></div></section>')
+
+    out.append('<script>function filterScreenerTable(inputId,tableId){'
+               'var f=(document.getElementById(inputId).value||"").toLowerCase();'
+               'var rows=document.querySelectorAll("#"+tableId+" tbody tr");'
+               'rows.forEach(function(tr){var show=!f||tr.textContent.toLowerCase().indexOf(f)!==-1;'
+               'tr.style.display=show?"":"none";});}</script>')
 
     out.append('<p class="sub" style="margin-top:8px">Kilder: yfinance (fundamentaldata), '
                'SEC EDGAR Form 4 (innsidekjøp, kun USA). Univers utvides gradvis — se '

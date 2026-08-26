@@ -97,6 +97,27 @@ def fetch_obx():
     return [(f"{sym}.OL", nm, "NO", "—") for sym, nm in rows]
 
 
+def fetch_ftse100():
+    """FTSE 100 (Storbritannia, London -> .L)."""
+    rows = _fetch_wiki_table("https://en.wikipedia.org/wiki/FTSE_100_Index", "FTSE",
+                             ["Ticker", "EPIC"], ["Company", "Name"])
+    return [(f"{sym}.L", nm, "GB", "—") for sym, nm in rows]
+
+
+def fetch_aex():
+    """AEX-indeksen (Nederland, Euronext Amsterdam -> .AS)."""
+    rows = _fetch_wiki_table("https://en.wikipedia.org/wiki/AEX_index", "AEX",
+                             ["Ticker symbol", "Ticker"], ["Company", "Name"])
+    return [(f"{sym}.AS", nm, "NL", "—") for sym, nm in rows]
+
+
+def fetch_cac40():
+    """CAC 40 (Frankrike, Euronext Paris -> .PA)."""
+    rows = _fetch_wiki_table("https://en.wikipedia.org/wiki/CAC_40", "CAC",
+                             ["Ticker", "Ticker symbol"], ["Company", "Name"])
+    return [(f"{sym}.PA", nm, "FR", "—") for sym, nm in rows]
+
+
 DYNAMIC_FETCHERS = [
     ("S&P 500", fetch_sp500),
     ("DAX", fetch_dax),
@@ -104,6 +125,9 @@ DYNAMIC_FETCHERS = [
     ("S&P/TSX 60", fetch_tsx60),
     ("OMX Stockholm 30", fetch_omxs30),
     ("OBX", fetch_obx),
+    ("FTSE 100", fetch_ftse100),
+    ("AEX", fetch_aex),
+    ("CAC 40", fetch_cac40),
 ]
 
 

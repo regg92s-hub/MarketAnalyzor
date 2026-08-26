@@ -660,3 +660,44 @@ oversettelse — vi henter allerede fundamentaldata via yfinance, som bruker
 nøyaktig samme ticker-format som Yahoo Finance selv.
 
 **Ikke finansrådgivning.**
+
+## v20: Flere børser, "Vekst med oppside", søkbare tabeller
+
+**Flere børser i Aksje-screeneren.** Bekreftet direkte fra Nordnet at
+Zero-kontoen dekker de nordiske børsene, Tyskland, USA, Canada,
+Storbritannia og Euronext. Lagt til Storbritannia (FTSE 100), Nederland
+(AEX) og Frankrike (CAC 40) — samme mønster som v18: en håndplukket
+seed-liste (`stock_universe.py`) kombinert med en dynamisk Wikipedia-hentet
+indeks (`universe_fetch.py`). Universet vokser videre fra det som allerede
+var der. **Kontokolonnen** viser nå «🇳🇴 ASK» eller «Zero» i stedet for et
+rått «ikke ASK» — tydeliggjør at amerikanske/kanadiske/britiske aksjer
+fortsatt er fullt handlbare via Zero-kontoen, bare uten ASK-ens skattefordel
+(utsatt/skattefri gevinstbeskatning), siden disse børsene ikke er
+EØS-domisilert.
+
+**Den viktigste endringen: «🚀 Vekst med oppside».** Vekst- og
+Value-listene svarer begge kun på ett spørsmål — *har selskapet vokst?* En
+aksje kan ha steget 300 % og troner øverst på vekstlisten uten at det er
+noe igjen å hente; «vokser rett og bra» og «har fortsatt mye kursoppside
+igjen» er to forskjellige spørsmål. Den nye listen krysser ekte vekst
+(minst ett av vekstkravene oppfylt) med tre fremoverskuende mål:
+**PEG-ratio** < 2 (er prisen fornuftig relativt til inntjeningsveksten),
+**avstand fra 200-dagers snitt** < 25 % (er den allerede strukket), og
+**analytikernes kursmål** > 10 % over dagens kurs (ser markedet fortsatt
+oppside). Rangert på dekningsgrad, samme mønster som Vekst/Value. Alle tre
+feltene hentes fra samme yfinance `.info`-kall som resten av
+fundamentaldataene — ingen ekstra nettverkskostnad.
+
+**Søkefilter og omskrevet forklaringsboks.** Hver av de tre tabellene har
+nå sitt eget tekstfilter (klientside, filtrerer på selskap/ticker/sektor/
+land). Forklaringsboksen øverst er skrevet om for faktisk å forklare
+forskjellen mellom «har vokst» og «har mer å gå på», ikke bare liste opp
+kravene.
+
+**Ærlig begrensning:** PEG og analytiker-kursmål er mer konsistent
+tilgjengelig for amerikanske og store europeiske aksjer enn for mindre
+nordiske selskaper i yfinances gratis-data — der vil disse to badgene
+oftere vise «ukjent». Det er ikke en bug, det er dekningsgrensen i
+gratisdata, og den vises ærlig som «ukjent» i stedet for å gjette.
+
+**Ikke finansrådgivning.**

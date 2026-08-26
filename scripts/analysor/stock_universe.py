@@ -1,19 +1,25 @@
 """
-v17: Kuratert aksjeunivers for Aksje-screener.
+v20: Kuratert aksjeunivers for Aksje-screener.
 
 IKKE et forsøk på full markedsdekning — det ville krevd tusenvis av tickere og
 er upålitelig med yfinance i bulk (dokumentert rate-limiting over ~80-100
 tickere per kjøring). Dette er en håndplukket, men reell og verifiserbar
-liste av likvide selskaper fra hovedindeksene i de fire markedene, ment å
+liste av likvide selskaper fra hovedindeksene i markedene under, ment å
 utvides over tid. Kjøres UKENTLIG (ikke daglig) — fundamentaldata endrer seg
 uansett bare på kvartalsbasis.
 
 Ticker-suffiks (Yahoo Finance-konvensjon): .DE=Xetra, .OL=Oslo, .ST=Stockholm,
-.CO=København, .HE=Helsinki, .TO=Toronto, ingen suffiks=USA (NYSE/NASDAQ).
+.CO=København, .HE=Helsinki, .TO=Toronto, .L=London, .AS=Amsterdam, .PA=Paris,
+ingen suffiks=USA (NYSE/NASDAQ).
 
-ask_eligible: EØS-domisilert børs -> True (Tyskland, Norden). USA og Canada
-er IKKE EØS -> ikke ASK-kvalifisert (skatteregel, uavhengig av om megleren din
-tilbyr tilgang til børsen).
+ask_eligible: EØS-domisilert børs -> True (Tyskland, Norden, Nederland,
+Frankrike/Euronext). USA, Canada og Storbritannia er IKKE EØS (UK forlot EØS
+ved Brexit) -> ikke ASK-kvalifisert (skatteregel, uavhengig av om megleren
+din tilbyr tilgang til børsen). v20: bekreftet direkte fra Nordnet at
+Zero-kontoen dekker samtlige børser her (Norden, Tyskland, USA, Canada,
+Storbritannia, Euronext) — aksjene er altså fullt handlbare selv der
+ask_eligible er False, bare uten ASK-ens skattefordel (utsatt
+gevinstbeskatning, skattefrie interne bytter).
 """
 from __future__ import annotations
 
@@ -23,8 +29,11 @@ REGIONS = {
     "SE": {"label": "Sverige", "exchange": "Nasdaq Stockholm", "ask_eligible": True},
     "DK": {"label": "Danmark", "exchange": "Nasdaq København", "ask_eligible": True},
     "FI": {"label": "Finland", "exchange": "Nasdaq Helsinki", "ask_eligible": True},
+    "NL": {"label": "Nederland", "exchange": "Euronext Amsterdam", "ask_eligible": True},
+    "FR": {"label": "Frankrike", "exchange": "Euronext Paris", "ask_eligible": True},
     "CA": {"label": "Canada", "exchange": "TSX", "ask_eligible": False},
     "US": {"label": "USA", "exchange": "NYSE/NASDAQ", "ask_eligible": False},
+    "GB": {"label": "Storbritannia", "exchange": "London Stock Exchange", "ask_eligible": False},
 }
 
 # (ticker, selskapsnavn, region, sektor)
@@ -158,6 +167,48 @@ SEED_UNIVERSE = [
     ("V", "Visa", "US", "Betalingsformidling"),
     ("MA", "Mastercard", "US", "Betalingsformidling"),
     ("COST", "Costco Wholesale", "US", "Dagligvare/medlemsklubb"),
+
+    # ── Storbritannia: FTSE 100 (utvalg) ────────────────────────────
+    ("AZN.L", "AstraZeneca", "GB", "Legemidler"),
+    ("SHEL.L", "Shell", "GB", "Energi"),
+    ("HSBA.L", "HSBC Holdings", "GB", "Bank"),
+    ("ULVR.L", "Unilever", "GB", "Forbruksvarer"),
+    ("RIO.L", "Rio Tinto", "GB", "Gruvedrift"),
+    ("BP.L", "BP", "GB", "Energi"),
+    ("GSK.L", "GSK", "GB", "Legemidler"),
+    ("DGE.L", "Diageo", "GB", "Drikkevarer"),
+    ("BATS.L", "British American Tobacco", "GB", "Tobakk"),
+    ("REL.L", "RELX", "GB", "Informasjonstjenester"),
+    ("LSEG.L", "London Stock Exchange Group", "GB", "Finansiell infrastruktur"),
+    ("NG.L", "National Grid", "GB", "Forsyning"),
+    ("BARC.L", "Barclays", "GB", "Bank"),
+    ("VOD.L", "Vodafone Group", "GB", "Telekom"),
+    ("RR.L", "Rolls-Royce Holdings", "GB", "Luftfart/forsvar"),
+
+    # ── Nederland: AEX (utvalg) ──────────────────────────────────────
+    ("ASML.AS", "ASML Holding", "NL", "Halvlederutstyr"),
+    ("ADYEN.AS", "Adyen", "NL", "Betalingsformidling"),
+    ("PRX.AS", "Prosus", "NL", "Teknologiinvestering"),
+    ("HEIA.AS", "Heineken", "NL", "Drikkevarer"),
+    ("INGA.AS", "ING Groep", "NL", "Bank"),
+    ("PHIA.AS", "Philips", "NL", "Medisinsk teknologi"),
+    ("WKL.AS", "Wolters Kluwer", "NL", "Informasjonstjenester"),
+    ("AD.AS", "Ahold Delhaize", "NL", "Dagligvare"),
+    ("RAND.AS", "Randstad", "NL", "Bemanning"),
+
+    # ── Frankrike: CAC 40 (utvalg) ───────────────────────────────────
+    ("MC.PA", "LVMH", "FR", "Luksusvarer"),
+    ("OR.PA", "L'Oréal", "FR", "Forbruksvarer"),
+    ("TTE.PA", "TotalEnergies", "FR", "Energi"),
+    ("SAN.PA", "Sanofi", "FR", "Legemidler"),
+    ("AI.PA", "Air Liquide", "FR", "Industrigass"),
+    ("SU.PA", "Schneider Electric", "FR", "Elektrisk utstyr"),
+    ("BNP.PA", "BNP Paribas", "FR", "Bank"),
+    ("CAP.PA", "Capgemini", "FR", "IT-tjenester"),
+    ("DG.PA", "Vinci", "FR", "Bygg/infrastruktur"),
+    ("EL.PA", "EssilorLuxottica", "FR", "Optikk"),
+    ("RMS.PA", "Hermès", "FR", "Luksusvarer"),
+    ("SGO.PA", "Saint-Gobain", "FR", "Byggematerialer"),
 ]
 
 # CIK-oppslag (for SEC-innsidesignal) må skje dynamisk via SEC sin egen
@@ -166,9 +217,13 @@ SEED_UNIVERSE = [
 # v19: TradingView bruker EXCHANGE:SYMBOL, ikke Yahoo sitt børs-suffiks.
 # Egen oversetter for aksje-screeneren (ETF/krypto-universet har sin egen
 # tv_symbol() i config.py).
+# v20: lagt til London (LSE) og Euronext Amsterdam/Paris (TradingView slår
+# sammen Euronext-børsene under ett "EURONEXT"-exchange-navn).
 _TV_EXCHANGE = {"DE": "XETR", "NO": "OSL", "SE": "OMXSTO", "DK": "OMXCOP",
-               "FI": "OMXHEX", "CA": "TSX"}
-_SUFFIX_TO_REGION = {"DE": "DE", "OL": "NO", "ST": "SE", "CO": "DK", "HE": "FI", "TO": "CA"}
+               "FI": "OMXHEX", "CA": "TSX", "GB": "LSE",
+               "NL": "EURONEXT", "FR": "EURONEXT"}
+_SUFFIX_TO_REGION = {"DE": "DE", "OL": "NO", "ST": "SE", "CO": "DK", "HE": "FI",
+                     "TO": "CA", "L": "GB", "AS": "NL", "PA": "FR"}
 
 
 def screener_tv_symbol(ticker: str) -> str:

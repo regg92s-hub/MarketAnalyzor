@@ -11,9 +11,18 @@ kjøringen — samme mønster som resten av siden), beregner:
   - D/E (total gjeld / egenkapital)
   - Innsidekjøp siste 90 dager (KUN USA, via SEC Form 4 — se _sec_insider_buy)
 
-Rangerer mot brukerens to skjermer:
-  VEKST:  omsetningsvekst YoY > 50%  OG  QoQ > 40%
-  VALUE:  EPS-vekst YoY > 50%  OG  QoQ > 40%  OG  margin > 10%  OG  D/E < 1,2
+Rangerer mot brukerens skjermer:
+  VEKST:            omsetningsvekst YoY > 50%  OG  QoQ > 40%
+  VALUE:            EPS-vekst YoY > 50%  OG  QoQ > 40%  OG  margin > 10%  OG  D/E < 1,2
+  VEKST MED OPPSIDE (v20): blant aksjene med reell omsetningsvekst (minst ett
+                    vekstkrav oppfylt) — rangert etter tre fremoverskuende mål:
+                    PEG-ratio < 2 (prisen er fornuftig relativt til inntjeningsveksten),
+                    avstand fra 200-dagers snitt < 25% (ikke allerede strukket),
+                    analytikernes kursmål > 10% over dagens kurs (markedet ser
+                    fortsatt oppside). Svarer på "har vokst OG har mer å gå på" —
+                    Vekst/Value over svarer kun på "har vokst". Alle tre feltene
+                    hentes fra samme yfinance .info-kall som resten av
+                    fundamentaldataene, altså ingen ekstra nettverkskostnad.
 
 Kravene over er bevisst strenge (se README) — de fleste reelle kandidater vil
 oppfylle NOEN, ikke alle, kriteriene. Vi rangerer derfor etter en dekningsgrad
@@ -105,6 +114,26 @@ def fetch_fundamentals(ticker: str):
             if de is not None:
                 de = de / 100.0 if de > 10 else de  # yfinance gir ofte % (f.eks 120 = 1.2)
 
+            # v20: tre fremoverskuende oppside-mål — samme .info-kall som over,
+            # ingen ekstra nettverkskostnad. Mer konsistent tilgjengelig for
+            # amerikanske/store europeiske aksjer enn for mindre nordiske
+            # selskaper i yfinances gratis-data; vises ærlig som "ukjent" der
+            # den mangler i stedet for å late som vi vet.
+            price = _safe_float(info.get("currentPrice") or info.get("regularMarketPrice"))
+            ma200 = _safe_float(info.get("twoHundredDayAverage"))
+            dist200 = None
+            if price is not None and ma200:
+                dist200 = (price / ma200 - 1) * 100
+
+            target_mean = _safe_float(info.get("targetMeanPrice"))
+            target_upside = None
+            if price is not None and target_mean is not None and price:
+                target_upside = (target_mean / price - 1) * 100
+
+            peg = _safe_float(info.get("trailingPegRatio"))
+            if peg is None:
+                peg = _safe_float(info.get("pegRatio"))
+
             return {
                 "ticker": ticker,
                 "name": info.get("shortName") or info.get("longName") or ticker,
@@ -117,6 +146,9 @@ def fetch_fundamentals(ticker: str):
                 "eps_qoq": round(eps_qoq, 1) if eps_qoq is not None else None,
                 "margin": round(margin, 1) if margin is not None else None,
                 "de": round(de, 2) if de is not None else None,
+                "peg": round(peg, 2) if peg is not None else None,
+                "dist200": round(dist200, 1) if dist200 is not None else None,
+                "target_upside": round(target_upside, 1) if target_upside is not None else None,
             }
         except Exception:
             time.sleep(1.5)
@@ -219,6 +251,21 @@ def _score_value(f):
     return hits
 
 
+def _score_upside(f):
+    """v20: Dekningsgrad 0-3 for "Vekst med oppside" — de tre fremoverskuende
+    målene (er prisen fornuftig, er den allerede strukket, ser markedet fortsatt
+    oppside). Brukes KUN på aksjer som allerede har reell vekst (se
+    rank_and_select) — dette scorer om den veksten fortsatt er kjøpbar."""
+    hits = 0
+    if f.get("peg") is not None and 0 < f["peg"] < 2:
+        hits += 1
+    if f.get("dist200") is not None and f["dist200"] < 25:
+        hits += 1
+    if f.get("target_upside") is not None and f["target_upside"] > 10:
+        hits += 1
+    return hits
+
+
 def fetch_universe_chunk(universe, chunk_index: int, chunk_total: int):
     """Henter fundamentaler for KUN denne chunk-jobbens skive av universet.
     Brukes av de parallelle fetch-jobbene i screener.yml — hver jobb tar en
@@ -244,16 +291,26 @@ def fetch_universe_chunk(universe, chunk_index: int, chunk_total: int):
 def rank_and_select(rows, top_n=20, insider_check_limit=40):
     """Ren rangeringsfunksjon: tar en FERDIG SAMMENSLÅTT liste av
     fundamental-dicter (fra alle chunks) og returnerer topp-N per skjerm.
-    Innsidesjekk (SEC) kjøres KUN på de endelige topp-40 radene, uansett
-    hvor stort råuniverset var — holder SEC-kallbudsjettet konstant."""
+    Innsidesjekk (SEC) kjøres KUN på de endelige topp-40(+) radene på tvers av
+    alle tre skjermene, uansett hvor stort råuniverset var — holder
+    SEC-kallbudsjettet konstant."""
     growth_ranked = sorted(rows, key=lambda r: (-_score_growth(r), -(r.get("rev_yoy") or -999)))
     value_ranked = sorted(rows, key=lambda r: (-_score_value(r), -(r.get("eps_yoy") or -999)))
     growth_top = growth_ranked[:top_n]
     value_top = value_ranked[:top_n]
 
+    # v20: "Vekst med oppside" — kun blant aksjer med minst ett vekstkrav
+    # oppfylt (reell vekst), rangert etter dekning på de tre oppside-målene.
+    upside_pool = [r for r in rows if _score_growth(r) >= 1]
+    upside_ranked = sorted(
+        upside_pool,
+        key=lambda r: (-_score_upside(r), -_score_growth(r), -(r.get("rev_yoy") or -999)))
+    upside_top = upside_ranked[:top_n]
+
     checked = 0
     seen_tickers = set()
-    for r in growth_top + value_top:
+    all_top = growth_top + value_top + upside_top
+    for r in all_top:
         if r["ticker"] in seen_tickers:
             continue
         seen_tickers.add(r["ticker"])
@@ -262,10 +319,9 @@ def rank_and_select(rows, top_n=20, insider_check_limit=40):
             continue
         r["insider_buy"] = sec_insider_buy(r["ticker"])
         checked += 1
-    # Kopier insider-resultat til evt. duplikat-forekomst (samme aksje i begge lister)
-    by_ticker = {r["ticker"]: r.get("insider_buy") for r in growth_top + value_top
-                if r["ticker"] in seen_tickers}
-    for r in growth_top + value_top:
+    # Kopier insider-resultat til evt. duplikat-forekomst (samme aksje i flere lister)
+    by_ticker = {r["ticker"]: r.get("insider_buy") for r in all_top if r["ticker"] in seen_tickers}
+    for r in all_top:
         if "insider_buy" not in r:
             r["insider_buy"] = by_ticker.get(r["ticker"])
 
@@ -275,6 +331,10 @@ def rank_and_select(rows, top_n=20, insider_check_limit=40):
     for r in value_top:
         r["value_score"] = _score_value(r)
         r["value_qualified"] = r["value_score"] == 4
+    for r in upside_top:
+        r["growth_score"] = _score_growth(r)
+        r["upside_score"] = _score_upside(r)
+        r["upside_qualified"] = r["upside_score"] == 3
 
     from datetime import datetime, timezone
     return {
@@ -282,6 +342,7 @@ def rank_and_select(rows, top_n=20, insider_check_limit=40):
         "n_scanned": len(rows),
         "growth": growth_top,
         "value": value_top,
+        "growth_upside": upside_top,
     }
 
 
