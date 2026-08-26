@@ -51,9 +51,29 @@ class _FakeTicker:
         self.balance_sheet = pd.DataFrame()
         margin = 0.25 if ticker in _EXTREME_TICKERS else 0.05 + (h % 25) / 100.0
         de = 0.2 if ticker in _EXTREME_TICKERS else (h % 200)
+        price = 50 + h
         self.info = {"shortName": f"Test Corp {ticker}", "sector": "Testsektor",
                     "marketCap": base_rev * 1e6, "currency": "USD", "trailingEps": 1.5,
-                    "profitMargins": margin, "debtToEquity": de}
+                    "profitMargins": margin, "debtToEquity": de,
+                    "currentPrice": price, "twoHundredDayAverage": price * 0.9,
+                    "targetMeanPrice": price * 1.15, "trailingPegRatio": 1.0 + (h % 200) / 100.0}
+        # v21: syntetisk 5-års daglig prishistorikk (deterministisk pr. hash) —
+        # øver på hele NSBC-teknisk-veien (resample + nsbc_score), ikke bare
+        # "ukjent"-fallbacken. Bruker samme growth_factor som fundamentaldataene
+        # slik at sterkt voksende tickere også får en synlig opptrend.
+        n = 5 * 252
+        rng = np.random.RandomState(h)
+        drift = np.linspace(0, np.log(max(growth_factor, 1.01)) * 2, n)
+        noise = np.cumsum(rng.normal(0, 0.012, n))
+        close = price * 0.4 * np.exp(drift + noise - noise[0])
+        dates = pd.bdate_range(end=pd.Timestamp.today().normalize(), periods=n)
+        self._hist = pd.DataFrame({
+            "Open": close, "High": close * 1.01, "Low": close * 0.99,
+            "Close": close, "Volume": rng.randint(1e5, 1e6, n),
+        }, index=dates)
+
+    def history(self, period="5y", auto_adjust=True):
+        return self._hist
 
 
 class _FakeYF:
@@ -99,8 +119,13 @@ assert data1["n_universe"] > 115, f"Univers ikke utvidet: {data1['n_universe']}"
 html1 = (OUT_DIR / "screener.html").read_text(encoding="utf-8")
 assert len(html1) > 20000 and "Vekstaksjer" in html1 and "Valueaksjer" in html1
 assert "Vekst med oppside" in html1, "v20-seksjonen mangler i screener.html"
+assert "Teknisk (Northstar)" in html1, "v21-teknisk-kolonnen mangler i screener.html"
+n_with_ta = sum(1 for r in data1["growth"] + data1["value"] + data1["growth_upside"]
+               if r.get("ta_score") is not None)
+assert n_with_ta > 0, "Ingen rader fikk en Northstar-teknisk score (v21-integrasjonen kjørte aldri)"
 print(f"UKE 1 OK: univers={data1['n_universe']}, vekst={len(data1['growth'])}, "
-     f"value={len(data1['value'])}, vekst-med-oppside={len(data1['growth_upside'])}")
+     f"value={len(data1['value'])}, vekst-med-oppside={len(data1['growth_upside'])}, "
+     f"med teknisk score={n_with_ta}")
 
 # === Uke 2: simuler at ett nytt selskap kvalifiserer (test Discord-diff) ===
 _EXTREME_TICKERS.add("DYN5")

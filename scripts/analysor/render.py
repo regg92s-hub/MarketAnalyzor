@@ -1492,7 +1492,7 @@ def _roadmap_block(rm, sym) -> str:
         f'</div>')
 
 
-# ── Aksje-screener (v17, ukentlig bygg; v20: "Vekst med oppside") ───
+# ── Aksje-screener (v17, ukentlig bygg; v20: "Vekst med oppside"; v21: Northstar) ───
 def _screener_row(r, kind):
     """kind: 'growth', 'value' eller 'upside'. Bygger én tabellrad med tydelig
     oppfyllelses-badge per krav (grønn=oppfylt, grå=ikke oppfylt/ukjent)."""
@@ -1513,10 +1513,26 @@ def _screener_row(r, kind):
     tkr = html.escape(r["ticker"])
     sec = html.escape(r.get("sector", ""))
     reg = html.escape(r.get("region_label", ""))
+    price = r.get("price")
+    price_s = f'{price:g} {html.escape(r.get("currency") or "")}'.strip() if price is not None else None
+    sub_line = f'{tkr} · {reg} · {sec}' + (f' · {price_s}' if price_s else '')
     tv_url = html.escape(screener_tv_url(r["ticker"]))
     yh_url = html.escape(screener_yahoo_url(r["ticker"]))
     links = (f'<a class="tv" href="{tv_url}" target="_blank" rel="noopener" title="TradingView-chart">📊</a> '
             f'<a class="tv" href="{yh_url}" target="_blank" rel="noopener" title="Yahoo Finance">💹</a>')
+
+    # v21: Northstar/NSBC-teknisk (se scoring.nsbc_score) — samme metodikk
+    # som resten av siden, kjørt på aksjens egen prishistorikk. Svarer på
+    # NÅR, ikke HVA — sekundært sorteringskriterium (screener.rank_and_select).
+    ta_score = r.get("ta_score")
+    if ta_score is None:
+        ta_html = '<span class="muted" style="font-size:11px">Ukjent<br><span style="font-size:9.5px">(for kort historikk)</span></span>'
+    else:
+        ta_text, ta_col = score_label(ta_score, {"stage_label": r.get("ta_stage_label")})
+        ta_html = (f'<span style="color:{ta_col};font-weight:700;font-size:11.5px" '
+                  f'title="Northstar-score {ta_score}/100 (Trend Navigator, Ichimoku, stage-analyse, '
+                  f'distance-fra-36-SMA, breakout — samme metodikk som resten av siden)">{ta_text}'
+                  f'<br><span style="font-size:9.5px;font-weight:600">{ta_score}/100</span></span>')
 
     if kind == "growth":
         score = r.get("growth_score", 0)
@@ -1554,9 +1570,15 @@ def _screener_row(r, kind):
         scorecol = PALETTE["up"] if qual else (PALETTE["warn"] if score >= 1 else "var(--muted)")
         badgetxt = "✅ Kvalifisert" if qual else f"{score}/3 krav"
 
-    return (f'<tr><td><strong>{name}</strong><br><span class="muted" style="font-size:11px">'
-           f'{tkr} · {reg} · {sec}</span></td>'
+    # v21: stjernemerket = fundamentalt kvalifisert OG Northstar lavrisiko-entry
+    # (score ≥70) — de faktiske "klar til å handle nå"-kandidatene på tvers
+    # av alle tre listene, ikke bare "vokser bra på papiret".
+    star = "⭐ " if (qual and (ta_score or 0) >= 70) else ""
+
+    return (f'<tr><td><strong>{star}{name}</strong><br><span class="muted" style="font-size:11px">'
+           f'{sub_line}</span></td>'
            f'<td style="font-weight:700;color:{scorecol};font-size:12px">{badgetxt}</td>'
+           f'<td style="text-align:center;line-height:1.5">{ta_html}</td>'
            f'<td style="font-size:10.5px;line-height:1.9">{badges}</td>'
            f'<td style="text-align:center">{ask}</td>'
            f'<td style="text-align:center">{insider_html}</td>'
@@ -1592,15 +1614,29 @@ def render_screener(data) -> str:
                'PEG og analytiker-kursmål er ærlig talt mer konsistent tilgjengelig for amerikanske og '
                'store europeiske aksjer enn for mindre nordiske selskaper i yfinances gratis-data — der '
                'vil du oftere se "ukjent" på disse to. Det er ikke en feil, det er dekningsgrensen i '
-               'gratisdata, og den vises som "ukjent" i stedet for å gjette.</span></div>')
+               'gratisdata, og den vises som "ukjent" i stedet for å gjette.<br><br>'
+               '<strong>🧭 Teknisk (Northstar)</strong>-kolonnen svarer på et TREDJE spørsmål: gitt at '
+               'selskapet er bra, er akkurat NÅ et fornuftig tidspunkt å gå inn? Kjører samme '
+               'Northstar/NSBC-metodikk (Trend Navigator, Ichimoku-sky, stage-analyse, avstand fra '
+               '36-dagers snitt, breakout-fra-base) som resten av siden bruker på ETF-ene, men på hver '
+               'enkelt aksjes egen kursutvikling. <strong>Lavrisiko-entry</strong> = konstruktiv trend som '
+               'IKKE er strukket (FOMO-sone) — det motsatte av en aksje som allerede har løpt langt. '
+               'Rekkefølgen i listene styres FORTSATT av dekningsgrad og faktisk vekst-/value-magnitude — '
+               'en ekte 300%-vekstaksje skal trone øverst i Vekst selv om timingen ikke er perfekt akkurat '
+               'nå. Teknisk-kolonnen brukes derfor ikke til å omrokkere listen, men til å vise deg HVILKE '
+               'av de allerede beste kandidatene som også har god timing. Aksjer merket <strong>⭐</strong> '
+               'er fundamentalt kvalifisert OG i Northstar lavrisiko-entry samtidig — de nærmeste "klar '
+               'til å handle nå"-kandidatene på hele siden. Krever minst ~3 måneders kurshistorikk for et '
+               'estimat; for korte historikker (nylige børsnoteringer) vises "ukjent".</span></div>')
 
     sections = (
         ("growth", "📈 Vekstaksjer", data.get("growth", []),
-         ["Selskap", "Status", "Detaljer", "ASK/Zero", "Innsidekjøp (90d)", "Lenker"]),
+         ["Selskap", "Status", "Teknisk (Northstar)", "Detaljer", "ASK/Zero", "Innsidekjøp (90d)", "Lenker"]),
         ("value", "💎 Valueaksjer", data.get("value", []),
-         ["Selskap", "Status", "Detaljer", "ASK/Zero", "Innsidekjøp (90d)", "Lenker"]),
+         ["Selskap", "Status", "Teknisk (Northstar)", "Detaljer", "ASK/Zero", "Innsidekjøp (90d)", "Lenker"]),
         ("upside", "🚀 Vekst med oppside", data.get("growth_upside", []),
-         ["Selskap", "Status", "PEG / 200d-snitt / analytiker-mål", "ASK/Zero", "Innsidekjøp (90d)", "Lenker"]),
+         ["Selskap", "Status", "Teknisk (Northstar)", "PEG / 200d-snitt / analytiker-mål", "ASK/Zero",
+          "Innsidekjøp (90d)", "Lenker"]),
     )
     qual_key = {"growth": "growth_qualified", "value": "value_qualified", "upside": "upside_qualified"}
     for kind, title, rows, cols in sections:
@@ -1608,11 +1644,13 @@ def render_screener(data) -> str:
             out.append(f'<section class="section"><h2>{title}</h2><p class="muted">Ingen data ennå.</p></section>')
             continue
         n_qual = sum(1 for r in rows if r.get(qual_key[kind]))
+        n_star = sum(1 for r in rows if r.get(qual_key[kind]) and (r.get("ta_score") or 0) >= 70)
         table_id = f"screener-{kind}"
         filter_id = f"{table_id}-filter"
         th = "".join(f"<th>{c}</th>" for c in cols)
         out.append(f'<section class="section"><h2>{title}</h2>'
-                   f'<p class="sub">{n_qual} av {len(rows)} viste kandidater oppfyller ALLE krav fullt ut.</p>'
+                   f'<p class="sub">{n_qual} av {len(rows)} viste kandidater oppfyller ALLE krav fullt ut'
+                   f'{f" · ⭐ {n_star} av disse er også i Northstar lavrisiko-entry akkurat nå" if n_star else ""}.</p>'
                    f'<input id="{filter_id}" type="text" placeholder="Filtrer på selskap, ticker, sektor, land..." '
                    f'oninput="filterScreenerTable(\'{filter_id}\',\'{table_id}\')" '
                    f'style="width:100%;max-width:340px;padding:7px 10px;margin:0 0 8px;background:var(--panel2);'

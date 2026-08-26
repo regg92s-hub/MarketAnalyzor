@@ -24,6 +24,20 @@ Rangerer mot brukerens skjermer:
                     hentes fra samme yfinance .info-kall som resten av
                     fundamentaldataene, altså ingen ekstra nettverkskostnad.
 
+TEKNISK/NORTHSTAR-LAG (v21): fundamentaldata svarer på HVA som er bra å eie —
+den sier ingenting om NÅR. Hver aksje kjøres derfor gjennom akkurat samme
+NSBC-metodikk (scoring.nsbc_score) som resten av siden bruker på ETF-ene i
+det daglige bygget — Trend Navigator (12/36-SMA), Ichimoku-sky, Stage-analyse,
+distance-fra-36-SMA (stretched/FOMO-sjekk) og breakout-fra-konsolidering — på
+aksjens egen ukentlige/månedlige/kvartalsvise prishistorikk (data.resample_frames,
+hentet via samme yf.Ticker-objekt som fundamentaldataene, altså kun ÉN ekstra
+forespørsel per aksje). Resultatet ("Northstar-score" 0-100 + stage) brukes
+som sekundært sorteringskriterium i alle tre listene — blant ellers like
+kandidater rangeres den med bedre teknisk oppsett (lavrisiko-entry) foran en
+som er strukket eller i nedtrend. Degraderer grasiøst til "ukjent" for aksjer
+med for kort historikk (typisk nylige børsnoteringer) til at kvartals-/
+månedsrammene gir mening — samme filosofi som PEG/analytiker-mål over.
+
 Kravene over er bevisst strenge (se README) — de fleste reelle kandidater vil
 oppfylle NOEN, ikke alle, kriteriene. Vi rangerer derfor etter en dekningsgrad
 ("hvor mange av kravene er oppfylt") i stedet for en hard alt-eller-ingenting-
@@ -33,6 +47,9 @@ aksje slik at du selv ser nøyaktig hva som er oppfylt.
 from __future__ import annotations
 
 import time
+
+import numpy as np
+import pandas as pd
 
 from .stock_universe import SEED_UNIVERSE, REGIONS
 
@@ -63,6 +80,54 @@ def _pct_growth(new, old):
         return (new / old - 1) * 100 if old > 0 else None
     except Exception:
         return None
+
+
+# v21: NSBC/Northstar-teknisk lag — se moduldocstringen. Ukjent-verdier for
+# aksjer med for kort/manglende historikk til at rammene gir mening.
+_TA_UNKNOWN = {
+    "ta_score": None, "ta_stage": None, "ta_stage_label": None,
+    "ta_long_term": None, "ta_short_term": None,
+    "ta_stretched": False, "ta_breakout": False, "ta_dist36": None,
+}
+
+
+def _fetch_technical(t):
+    """Kjør NSBC-metodikken (scoring.nsbc_score) på aksjens egen prishistorikk.
+    Gjenbruker det allerede instansierte yf.Ticker-objektet `t` — én ekstra
+    forespørsel (.history), ingen ny Ticker-instansiering. Aldri fatal: enhver
+    feil eller for kort historikk gir _TA_UNKNOWN, ikke et krasj som velter
+    hele fundamentalhentingen for aksjen."""
+    try:
+        from . import data as datamod, scoring
+        hist = t.history(period="5y", auto_adjust=True)
+        if hist is None or hist.empty or len(hist) < 60:
+            return _TA_UNKNOWN
+        df = pd.DataFrame(index=hist.index)
+        df["close_use"] = hist["Close"]
+        df["high"] = hist["High"] if "High" in hist else hist["Close"]
+        df["low"] = hist["Low"] if "Low" in hist else hist["Close"]
+        df["open"] = hist["Open"] if "Open" in hist else hist["Close"]
+        df["volume"] = hist["Volume"] if "Volume" in hist else np.nan
+        df = df.dropna(subset=["close_use"])
+        df.index = pd.to_datetime(df.index)
+        if df.index.tz is not None:
+            df.index = df.index.tz_localize(None)
+        frames = datamod.resample_frames(df)
+        score, meta = scoring.nsbc_score(frames)
+        if not meta or meta.get("stage") is None:
+            return _TA_UNKNOWN
+        return {
+            "ta_score": score,
+            "ta_stage": meta.get("stage"),
+            "ta_stage_label": meta.get("stage_label"),
+            "ta_long_term": meta.get("long_term"),
+            "ta_short_term": meta.get("short_term"),
+            "ta_stretched": bool(meta.get("stretched")),
+            "ta_breakout": bool(meta.get("breakout")),
+            "ta_dist36": meta.get("dist36"),
+        }
+    except Exception:
+        return _TA_UNKNOWN
 
 
 def fetch_fundamentals(ticker: str):
@@ -134,12 +199,15 @@ def fetch_fundamentals(ticker: str):
             if peg is None:
                 peg = _safe_float(info.get("pegRatio"))
 
+            ta = _fetch_technical(t)
+
             return {
                 "ticker": ticker,
                 "name": info.get("shortName") or info.get("longName") or ticker,
                 "sector_yf": info.get("sector"),
                 "market_cap": _safe_float(info.get("marketCap")),
                 "currency": info.get("currency"),
+                "price": round(price, 2) if price is not None else None,
                 "rev_yoy": round(rev_yoy, 1) if rev_yoy is not None else None,
                 "rev_qoq": round(rev_qoq, 1) if rev_qoq is not None else None,
                 "eps_yoy": round(eps_yoy, 1) if eps_yoy is not None else None,
@@ -149,6 +217,7 @@ def fetch_fundamentals(ticker: str):
                 "peg": round(peg, 2) if peg is not None else None,
                 "dist200": round(dist200, 1) if dist200 is not None else None,
                 "target_upside": round(target_upside, 1) if target_upside is not None else None,
+                **ta,
             }
         except Exception:
             time.sleep(1.5)
@@ -293,18 +362,30 @@ def rank_and_select(rows, top_n=20, insider_check_limit=40):
     fundamental-dicter (fra alle chunks) og returnerer topp-N per skjerm.
     Innsidesjekk (SEC) kjøres KUN på de endelige topp-40(+) radene på tvers av
     alle tre skjermene, uansett hvor stort råuniverset var — holder
-    SEC-kallbudsjettet konstant."""
-    growth_ranked = sorted(rows, key=lambda r: (-_score_growth(r), -(r.get("rev_yoy") or -999)))
-    value_ranked = sorted(rows, key=lambda r: (-_score_value(r), -(r.get("eps_yoy") or -999)))
+    SEC-kallbudsjettet konstant.
+
+    v21: Northstar-teknisk score (`ta_score`, se _fetch_technical) brytes inn
+    som SISTE tiebreaker — ETTER dekningsgrad og ETTER selve vekstmagnituden.
+    En aksje med reelt ekstrem vekst skal fortsatt trone øverst i Vekst-listen
+    selv om timingen ikke er perfekt akkurat nå (det er nettopp derfor
+    Teknisk-kolonnen og ⭐-merket finnes — for å vise DEG hvem av de allerede
+    beste som også har god timing, ikke for å gjemme bort de sterkeste
+    vekstnavnene fordi de er midlertidig strukket)."""
+    growth_ranked = sorted(
+        rows, key=lambda r: (-_score_growth(r), -(r.get("rev_yoy") or -999), -(r.get("ta_score") or 0)))
+    value_ranked = sorted(
+        rows, key=lambda r: (-_score_value(r), -(r.get("eps_yoy") or -999), -(r.get("ta_score") or 0)))
     growth_top = growth_ranked[:top_n]
     value_top = value_ranked[:top_n]
 
     # v20: "Vekst med oppside" — kun blant aksjer med minst ett vekstkrav
-    # oppfylt (reell vekst), rangert etter dekning på de tre oppside-målene.
+    # oppfylt (reell vekst), rangert etter dekning på de tre oppside-målene,
+    # så (v21) teknisk score som siste tiebreaker.
     upside_pool = [r for r in rows if _score_growth(r) >= 1]
     upside_ranked = sorted(
         upside_pool,
-        key=lambda r: (-_score_upside(r), -_score_growth(r), -(r.get("rev_yoy") or -999)))
+        key=lambda r: (-_score_upside(r), -_score_growth(r),
+                       -(r.get("rev_yoy") or -999), -(r.get("ta_score") or 0)))
     upside_top = upside_ranked[:top_n]
 
     checked = 0

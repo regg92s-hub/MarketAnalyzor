@@ -701,3 +701,50 @@ oftere vise «ukjent». Det er ikke en bug, det er dekningsgrensen i
 gratisdata, og den vises ærlig som «ukjent» i stedet for å gjette.
 
 **Ikke finansrådgivning.**
+
+## v21: Northstar-teknisk lag, pris i listen, ⭐-merking
+
+**Hvorfor:** fundamentaldata (vekst/value/oppside) svarer på HVA som er en
+bra aksje å eie — de sier ingenting om NÅR det er et fornuftig tidspunkt å
+gå inn. v21 legger til akkurat samme Northstar/NSBC-metodikk
+(`scoring.nsbc_score`) som resten av siden allerede bruker på ETF-ene i det
+daglige bygget — Trend Navigator (12/36-SMA), Ichimoku-sky, Weinstein
+stage-analyse, distance-fra-36-SMA (stretched/FOMO-sjekk) og
+breakout-fra-konsolidering — kjørt på hver enkelt screener-aksjes egen
+ukentlige/månedlige/kvartalsvise prishistorikk (`data.resample_frames`).
+
+**Ny «Teknisk (Northstar)»-kolonne** på alle tre tabellene viser
+stage-etikett + score 0-100 (gjenbruker `scoring.score_label` for identisk
+fargekoding/tekst som resten av siden). Hentes via samme yf.Ticker-objekt
+som fundamentaldataene (`.history()`) — kun én ekstra forespørsel per aksje,
+ingen ny Ticker-instansiering. Degraderer grasiøst til «ukjent (for kort
+historikk)» for aksjer uten nok prishistorikk til at ukentlig/månedlig gir
+mening (typisk nylige børsnoteringer) — samme filosofi som PEG/analytiker-mål.
+
+**⭐-merking**: aksjer som er fundamentalt kvalifisert OG i Northstar
+lavrisiko-entry (score ≥70) SAMTIDIG merkes med en stjerne — de nærmeste
+"klar til å handle nå"-kandidatene på hele siden, og hver seksjon viser nå
+også et telletall for hvor mange av de kvalifiserte som er stjernemerket.
+
+**Bevisst IKKE latt teknisk score omrokkere hovedrangeringen.** Første
+forsøk brukte `ta_score` som sekundært sorteringskriterium (før selve
+vekst-/value-magnituden) — det viste seg fort å produsere kontraintuitive
+resultater i test (en aksje med ekstrem, reell vekst kunne falle helt ut av
+topp-20 fordi timingen tilfeldigvis var svak). Rettet til: dekningsgrad og
+faktisk vekst-/value-magnitude bestemmer FORTSATT rekkefølgen (en ekte
+300%-vekstaksje skal trone øverst uansett timing); teknisk score brukes kun
+som aller siste tiebreaker ved reelle uavgjort. Teknisk-kolonnen og
+⭐-merket viser deg heller HVILKE av de allerede beste kandidatene som også
+har god timing — riktigere løsning på "sorter beste øverst" enn å la
+teknikk overstyre fundamentale ytterpunkter.
+
+**Prisen vises nå** i hver rad (valuta inkludert) — nyttig når du faktisk
+skal legge inn en ordre, ikke bare vurdere kvalifisering.
+
+**Testet**: `test_screener_synthetic.py` fikk en syntetisk 5-års
+prishistorikk per mock-ticker (korrelert med samme vekstfaktor som
+fundamentaldataene) slik at hele NSBC-integrasjonsveien faktisk øves i CI,
+ikke bare "ukjent"-fallbacken — verifiserer at Teknisk-kolonnen finnes i
+HTML-en og at minst noen rader får en reell score.
+
+**Ikke finansrådgivning.**
