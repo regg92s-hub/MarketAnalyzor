@@ -1,4 +1,4 @@
-const CACHE = 'analysor-2026-08-21-analysor-v19';
+const CACHE = 'analysor-2026-08-24-analysor-v20';
 const CORE = ['./','./index.html','./trend.html','./report.html','./roadmap.html','./portfolio.html','./backtest.html','./screener.html',
   './lightweight-charts.standalone.production.js','./manifest.webmanifest'];
 self.addEventListener('install', e => {
